@@ -35,7 +35,7 @@
 #include "utilities.h"
 #include "asm.h"
 
-#include "x86.h"
+#include <asmjit/x86.h>
 using namespace asmjit;
 using namespace asmjit::x86;
 

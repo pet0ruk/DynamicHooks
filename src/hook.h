@@ -40,7 +40,7 @@
 #include "registers.h"
 #include "convention.h"
 
-#include "x86.h"
+#include <asmjit/x86.h>
 
 
 // ============================================================================
