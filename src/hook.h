@@ -157,8 +157,11 @@ private:
 
 	void Write_ModifyReturnAddress(CHookAssembler& assembler);
 	void Write_CallHandler(CHookAssembler& assembler, HookType_t type, CRegisters* pRegisters);
-	void Write_SaveRegisters(CHookAssembler& assembler, CRegisters* pRegisters);
-	void Write_RestoreRegisters(CHookAssembler& assembler, CRegisters* pRegisters);
+	// bWithST0: whether to save/restore st0, which only holds a value (the return value) after
+	// the function has returned. At function entry the x87 stack is empty.
+	void Write_SaveRegisters(CHookAssembler& assembler, CRegisters* pRegisters, bool bWithST0);
+	void Write_RestoreRegisters(CHookAssembler& assembler, CRegisters* pRegisters, bool bWithST0);
+	void Write_LoadST0(CHookAssembler& assembler, CRegisters* pRegisters);
 
 	bool CreatePostCallback();
 

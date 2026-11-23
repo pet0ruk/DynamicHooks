@@ -24,8 +24,11 @@ cmake --build build --config Release && ctest --test-dir build -C Release
 ```
 
 The tests (`tests/`, option `DYNAMICHOOKS_TESTS`, on when built on its own) hook a function of
-each calling convention and check the arguments and return values the hooks see and set. CI
-(`.github/workflows/ci.yml`) runs them on Linux i686 and Windows Win32.
+each calling convention and check the arguments and return values the hooks see and set.
+`tests/conventions.cpp` is built for every convention and return type (int, long long, float,
+double), with arguments of each size; it also checks that a pre-hook can skip the function,
+that unhooking restores it, and that the stack pointer and x87 stack are as the caller left
+them. CI (`.github/workflows/ci.yml`) runs them on Linux i686 and Windows Win32.
 
 ## Licence
 

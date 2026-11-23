@@ -201,7 +201,8 @@ bool CHook::CreateBridge()
 	a.cmp(eax, true);
 	
 	// Restore the previously saved registers, so any changes will be applied
-	Write_RestoreRegisters(assembler, m_pRegistersPre);
+	// (not st0: the x87 stack is empty at function entry and must stay so)
+	Write_RestoreRegisters(assembler, m_pRegistersPre, false);
 
 	a.je(label_override);
 
@@ -210,6 +211,10 @@ bool CHook::CreateBridge()
 
 	// This code will be executed if a pre-hook returns true
 	a.bind(label_override);
+
+	// The original function is skipped, so load the return value the pre-hook set into st0
+	// if the function returns a floating-point value.
+	Write_LoadST0(assembler, m_pRegistersPre);
 
 	// Finally, return to the caller
 	// This will still call post hooks, but will skip the original function.
@@ -268,7 +273,7 @@ bool CHook::CreatePostCallback()
 	Write_CallHandler(assembler, HOOKTYPE_POST, m_pRegistersPost);
 
 	// Restore the previously saved registers, so any changes will be applied
-	Write_RestoreRegisters(assembler, m_pRegistersPost);
+	Write_RestoreRegisters(assembler, m_pRegistersPost, true);
 
 	// Save scratch registers that are used by GetReturnAddress
 	static void* pEAX = NULL;
@@ -311,7 +316,7 @@ void CHook::Write_CallHandler(CHookAssembler& assembler, HookType_t type, CRegis
 	bool (__cdecl CHook::*HookHandler)(HookType_t) = &CHook::HookHandler;
 
 	// Save the registers so that we can access them in our handlers
-	Write_SaveRegisters(assembler, pRegisters);
+	Write_SaveRegisters(assembler, pRegisters, type == HOOKTYPE_POST);
 
 	// Call the global hook handler
 	// Subtract 4 bytes to preserve 16-Byte stack alignment for Linux
@@ -322,7 +327,7 @@ void CHook::Write_CallHandler(CHookAssembler& assembler, HookType_t type, CRegis
 	a.add(esp, 12);
 }
 
-void CHook::Write_SaveRegisters(CHookAssembler& assembler, CRegisters* pRegisters)
+void CHook::Write_SaveRegisters(CHookAssembler& assembler, CRegisters* pRegisters, bool bWithST0)
 {
 	x86::Assembler& a = assembler.a;
 	std::list<Register_t> vecRegistersToSave = m_pCallingConvention->GetRegisters();
@@ -407,6 +412,9 @@ void CHook::Write_SaveRegisters(CHookAssembler& assembler, CRegisters* pRegister
 		// ========================================================================
 		case ST0:
 		{
+			if (!bWithST0)
+				break;
+
 			switch(GetDataTypeSize(this->m_pCallingConvention->m_returnType))
 			{
 				case SIZE_DWORD: a.fstp(dword_ptr_abs((uint64_t) pRegisters->m_st0->m_pAddress)); break;
@@ -428,7 +436,7 @@ void CHook::Write_SaveRegisters(CHookAssembler& assembler, CRegisters* pRegister
 	}
 }
 
-void CHook::Write_RestoreRegisters(CHookAssembler& assembler, CRegisters* pRegisters)
+void CHook::Write_RestoreRegisters(CHookAssembler& assembler, CRegisters* pRegisters, bool bWithST0)
 {
 	x86::Assembler& a = assembler.a;
 	std::list<Register_t> vecRegistersToSave = m_pCallingConvention->GetRegisters();
@@ -512,15 +520,9 @@ void CHook::Write_RestoreRegisters(CHookAssembler& assembler, CRegisters* pRegis
 		// >> 80-bit FPU registers
 		// ========================================================================
 		case ST0:
-		{
-			switch(GetDataTypeSize(this->m_pCallingConvention->m_returnType))
-			{
-				case SIZE_DWORD: a.fld(dword_ptr_abs((uint64_t) pRegisters->m_st0->m_pAddress)); break;
-				case SIZE_QWORD: a.fld(qword_ptr_abs((uint64_t) pRegisters->m_st0->m_pAddress)); break;
-				case SIZE_TWORD: a.fld(tword_ptr_abs((uint64_t) pRegisters->m_st0->m_pAddress)); break;
-			}
+			if (bWithST0)
+				Write_LoadST0(assembler, pRegisters);
 			break;
-		}
 		//case ST1: a.mov(st1, tword_ptr_abs(pRegisters->m_st1->m_pAddress)); break;
 		//case ST2: a.mov(st2, tword_ptr_abs(pRegisters->m_st2->m_pAddress)); break;
 		//case ST3: a.mov(st3, tword_ptr_abs(pRegisters->m_st3->m_pAddress)); break;
@@ -531,5 +533,20 @@ void CHook::Write_RestoreRegisters(CHookAssembler& assembler, CRegisters* pRegis
 
 		default: puts("Unsupported register.");
 		}
+	}
+}
+
+void CHook::Write_LoadST0(CHookAssembler& assembler, CRegisters* pRegisters)
+{
+	x86::Assembler& a = assembler.a;
+	DataType_t returnType = m_pCallingConvention->m_returnType;
+	if (returnType != DATA_TYPE_FLOAT && returnType != DATA_TYPE_DOUBLE)
+		return;
+
+	switch(GetDataTypeSize(returnType))
+	{
+		case SIZE_DWORD: a.fld(dword_ptr_abs((uint64_t) pRegisters->m_st0->m_pAddress)); break;
+		case SIZE_QWORD: a.fld(qword_ptr_abs((uint64_t) pRegisters->m_st0->m_pAddress)); break;
+		case SIZE_TWORD: a.fld(tword_ptr_abs((uint64_t) pRegisters->m_st0->m_pAddress)); break;
 	}
 }
