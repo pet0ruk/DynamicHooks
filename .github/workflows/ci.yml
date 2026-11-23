@@ -1,0 +1,47 @@
+# Builds DynamicHooks (with AsmJit fetched as pinned in cmake/asmjit.cmake) and runs the tests:
+# Linux i686 (GCC, in the manylinux_2_28 image Source.Python builds with) and Windows Win32 (MSVC).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  MANYLINUX_I686: quay.io/pypa/manylinux_2_28_i686@sha256:baf927c001d9dfead35e53de68b2c113b623155b7a878cc45e2e1ad61c9fb5e7
+
+jobs:
+  linux:
+    name: linux (i686, GCC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7 # v7.0.1
+      # Run directly with seccomp off: the runners' Docker profile blocks the 32-bit
+      # socketcall(2), which CMake's download of AsmJit needs.
+      - name: Build and test
+        run: |
+          docker run --rm --security-opt seccomp=unconfined -v "$PWD:/src:ro" "$MANYLINUX_I686" bash -euc '
+            gcc --version | head -1
+            cmake -S /src -B /tmp/build -DCMAKE_BUILD_TYPE=Release
+            cmake --build /tmp/build -j"$(nproc)"
+            ctest --test-dir /tmp/build --output-on-failure'
+
+  windows:
+    name: windows (Win32, MSVC)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7 # v7.0.1
+      - name: Build and test
+        shell: bash
+        run: |
+          cmake -S . -B build -A Win32
+          cmake --build build --config Release --parallel
+          ctest --test-dir build -C Release --output-on-failure
