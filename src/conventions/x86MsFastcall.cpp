@@ -38,6 +38,21 @@
 // ============================================================================
 // >> x86MsFastcall
 // ============================================================================
+// Whether an argument of this type is passed in a register (ecx/edx) when one is left.
+static bool IsRegisterArgument(DataType_t type)
+{
+	switch (type)
+	{
+		case DATA_TYPE_FLOAT:
+		case DATA_TYPE_DOUBLE:
+		case DATA_TYPE_LONG_LONG:
+		case DATA_TYPE_ULONG_LONG:
+			return false;
+		default:
+			return GetDataTypeSize(type) <= 4;
+	}
+}
+
 x86MsFastcall::x86MsFastcall(std::vector<DataType_t> vecArgTypes, DataType_t returnType, int iAlignment) : 
 	ICallingConvention(vecArgTypes, returnType, iAlignment)
 {
@@ -51,12 +66,26 @@ x86MsFastcall::x86MsFastcall(std::vector<DataType_t> vecArgTypes, DataType_t ret
 		m_pReturnBuffer = NULL;
 	}
 
+	m_pRegisters = new Register_t[m_vecArgTypes.size()];
 	m_pOffsets = new int[m_vecArgTypes.size()];
+	m_iRegisterArgs = 0;
+
+	// The stack arguments start after the return address.
 	int iOffset = 4;
-	for(int i=2; i < m_vecArgTypes.size(); i++)
+	for(unsigned int i=0; i < m_vecArgTypes.size(); i++)
 	{
-		m_pOffsets[i] = iOffset;
-		iOffset += GetDataTypeSize(m_vecArgTypes[i], m_iAlignment);
+		if (m_iRegisterArgs < 2 && IsRegisterArgument(m_vecArgTypes[i]))
+		{
+			m_pRegisters[i] = m_iRegisterArgs == 0 ? ECX : EDX;
+			m_pOffsets[i] = 0;
+			m_iRegisterArgs++;
+		}
+		else
+		{
+			m_pRegisters[i] = ESP;
+			m_pOffsets[i] = iOffset;
+			iOffset += GetDataTypeSize(m_vecArgTypes[i], m_iAlignment);
+		}
 	}
 }
 
@@ -67,6 +96,7 @@ x86MsFastcall::~x86MsFastcall()
 		free(m_pReturnBuffer);
 	}
 
+	delete[] m_pRegisters;
 	delete[] m_pOffsets;
 }
 
@@ -76,14 +106,12 @@ std::list<Register_t> x86MsFastcall::GetRegisters()
 	
 	registers.push_back(ESP);
 
-	int iArgSize = m_vecArgTypes.size();
-
-	if (iArgSize > 0)
+	if (m_iRegisterArgs > 0)
 	{
 		registers.push_back(ECX);
 	}
 
-	if (iArgSize > 1)
+	if (m_iRegisterArgs > 1)
 	{
 		registers.push_back(EDX);
 	}
@@ -95,7 +123,7 @@ std::list<Register_t> x86MsFastcall::GetRegisters()
 	else
 	{
 		registers.push_back(EAX);
-		if (m_pReturnBuffer && iArgSize <= 1)
+		if (m_pReturnBuffer && m_iRegisterArgs <= 1)
 		{
 			registers.push_back(EDX);
 		}
@@ -108,9 +136,10 @@ int x86MsFastcall::GetPopSize()
 {
 	int iPopSize = 0;
 
-	for(unsigned int i=2; i < m_vecArgTypes.size(); i++)
+	for(unsigned int i=0; i < m_vecArgTypes.size(); i++)
 	{
-		iPopSize += GetDataTypeSize(m_vecArgTypes[i], m_iAlignment);
+		if (m_pRegisters[i] == ESP)
+			iPopSize += GetDataTypeSize(m_vecArgTypes[i], m_iAlignment);
 	}
 
 	return iPopSize;
@@ -118,17 +147,12 @@ int x86MsFastcall::GetPopSize()
 
 void* x86MsFastcall::GetArgumentPtr(int iIndex, CRegisters* pRegisters)
 {
-	if (iIndex == 0)
+	switch (m_pRegisters[iIndex])
 	{
-		return pRegisters->m_ecx->m_pAddress;
+		case ECX: return pRegisters->m_ecx->m_pAddress;
+		case EDX: return pRegisters->m_edx->m_pAddress;
+		default:  return (void *) (pRegisters->m_esp->GetValue<unsigned long>() + m_pOffsets[iIndex]);
 	}
-
-	if (iIndex == 1)
-	{
-		return pRegisters->m_edx->m_pAddress;
-	}
-
-	return (void *) (pRegisters->m_esp->GetValue<unsigned long>() + m_pOffsets[iIndex]);
 }
 
 void x86MsFastcall::ArgumentPtrChanged(int iIndex, CRegisters* pRegisters, void* pArgumentPtr)
@@ -143,8 +167,8 @@ void* x86MsFastcall::GetReturnPtr(CRegisters* pRegisters)
 	if (m_pReturnBuffer)
 	{
 		// First half in eax, second half in edx
-		memcpy(m_pReturnBuffer, pRegisters->m_eax, 4);
-		memcpy((void *) ((unsigned long) m_pReturnBuffer + 4), pRegisters->m_edx, 4);
+		memcpy(m_pReturnBuffer, pRegisters->m_eax->m_pAddress, 4);
+		memcpy((void *) ((unsigned long) m_pReturnBuffer + 4), pRegisters->m_edx->m_pAddress, 4);
 		return m_pReturnBuffer;
 	}
 
@@ -159,7 +183,7 @@ void x86MsFastcall::ReturnPtrChanged(CRegisters* pRegisters, void* pReturnPtr)
 	if (m_pReturnBuffer)
 	{
 		// First half in eax, second half in edx
-		memcpy(pRegisters->m_eax, m_pReturnBuffer, 4);
-		memcpy(pRegisters->m_edx, (void *) ((unsigned long) m_pReturnBuffer + 4), 4);
+		memcpy(pRegisters->m_eax->m_pAddress, m_pReturnBuffer, 4);
+		memcpy(pRegisters->m_edx->m_pAddress, (void *) ((unsigned long) m_pReturnBuffer + 4), 4);
 	}
 }

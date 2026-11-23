@@ -45,16 +45,21 @@ Source: DynCall manual and Windows docs
 
 Registers:
 	- eax = return value
-	- ecx = parameter 0
-	- edx = parameter 1, return value
+	- ecx = first register argument
+	- edx = second register argument, return value
 	- esp = stack pointer
 	- st0 = floating point return value
 
 Parameter passing:
-	- stack parameter order: right-to-left
+	- the first two arguments, from left to right, that are 32 bits or smaller and not
+	  floating-point (bool, char, short, int, long, pointer, string) are passed in ecx and edx
+	- all other arguments (float, double, long long, and any after the first two register
+	  arguments) are pushed onto the stack, right-to-left
 	- callee cleans up the stack
-	- all other arguments are pushed onto the stack
 	- alignment: 4 bytes
+
+	For example, f(float a, int b, double c, int d, int e): b in ecx, d in edx; a, c and e on
+	the stack.
 
 Return values:
 	- return values of pointer or intergral type (<= 32 bits) are returned via the eax register
@@ -78,7 +83,12 @@ public:
 
 private:
 	void* m_pReturnBuffer;
+
+	// Per argument: its register (ECX or EDX), or ESP if it is on the stack, at m_pOffsets[i]
+	// bytes from esp (at function entry, so after the return address).
+	Register_t* m_pRegisters;
 	int* m_pOffsets;
+	int m_iRegisterArgs;
 };
 
 #endif // _X86_MS_FASTCALL_H

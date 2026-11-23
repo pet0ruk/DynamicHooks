@@ -103,6 +103,6 @@ int main()
 	assert(g_iPostMyFuncCallCount == 4);
 	assert(return_value == 3);
 
-	//pHookMngr->UnhookAllFunctions();
+	pHookMngr->UnhookAllFunctions();
 	return 0;
 }

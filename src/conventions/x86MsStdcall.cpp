@@ -122,8 +122,8 @@ void* x86MsStdcall::GetReturnPtr(CRegisters* pRegisters)
 	if (m_pReturnBuffer)
 	{
 		// First half in eax, second half in edx
-		memcpy(m_pReturnBuffer, pRegisters->m_eax, 4);
-		memcpy((void *) ((unsigned long) m_pReturnBuffer + 4), pRegisters->m_edx, 4);
+		memcpy(m_pReturnBuffer, pRegisters->m_eax->m_pAddress, 4);
+		memcpy((void *) ((unsigned long) m_pReturnBuffer + 4), pRegisters->m_edx->m_pAddress, 4);
 		return m_pReturnBuffer;
 	}
 
@@ -138,7 +138,7 @@ void x86MsStdcall::ReturnPtrChanged(CRegisters* pRegisters, void* pReturnPtr)
 	if (m_pReturnBuffer)
 	{
 		// First half in eax, second half in edx
-		memcpy(pRegisters->m_eax, m_pReturnBuffer, 4);
-		memcpy(pRegisters->m_edx, (void *) ((unsigned long) m_pReturnBuffer + 4), 4);
+		memcpy(pRegisters->m_eax->m_pAddress, m_pReturnBuffer, 4);
+		memcpy(pRegisters->m_edx->m_pAddress, (void *) ((unsigned long) m_pReturnBuffer + 4), 4);
 	}
 }
