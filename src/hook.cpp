@@ -187,11 +187,11 @@ void __cdecl CHook::SetReturnAddress(void* pRetAddr, void* pESP)
 bool CHook::CreateBridge()
 {
 	CodeHolder code;
-	code.init(m_pJit->rt.environment(), m_pJit->rt.cpuFeatures());
+	code.init(m_pJit->rt.environment(), m_pJit->rt.cpu_features());
 	x86::Assembler a(&code);
 	CHookAssembler assembler{a};
 
-	Label label_override = a.newLabel();
+	Label label_override = a.new_label();
 
 	// Write a redirect to the post-hook code
 	Write_ModifyReturnAddress(assembler);
@@ -215,7 +215,7 @@ bool CHook::CreateBridge()
 	// This will still call post hooks, but will skip the original function.
 	a.ret(imm(m_pCallingConvention->GetPopSize()));
 
-	return m_pJit->rt.add(&m_pBridge, &code);
+	return m_pJit->rt.add(&m_pBridge, &code) == Error::kOk;
 }
 
 void CHook::Write_ModifyReturnAddress(CHookAssembler& assembler)
@@ -254,7 +254,7 @@ void CHook::Write_ModifyReturnAddress(CHookAssembler& assembler)
 bool CHook::CreatePostCallback()
 {
 	CodeHolder code;
-	code.init(m_pJit->rt.environment(), m_pJit->rt.cpuFeatures());
+	code.init(m_pJit->rt.environment(), m_pJit->rt.cpu_features());
 	x86::Assembler a(&code);
 	CHookAssembler assembler{a};
 
@@ -302,7 +302,7 @@ bool CHook::CreatePostCallback()
 	a.jmp(dword_ptr_abs((uint64_t) &pRetAddr));
 
 	// Generate the code
-	return m_pJit->rt.add(&m_pNewRetAddr, &code);
+	return m_pJit->rt.add(&m_pNewRetAddr, &code) == Error::kOk;
 }
 
 void CHook::Write_CallHandler(CHookAssembler& assembler, HookType_t type, CRegisters* pRegisters)

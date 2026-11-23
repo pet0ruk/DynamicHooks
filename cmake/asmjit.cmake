@@ -5,8 +5,8 @@
 # =============================================================================
 include(FetchContent)
 
-set(DYNAMICHOOKS_ASMJIT_COMMIT e8c8e2e48a1a38154c8e8864eb3bc61db80a1e31)   # 1.14.0, 2025-03-30
-set(DYNAMICHOOKS_ASMJIT_SHA256 f3d0f56413dd88d069895e0f3933962cf1b687e901fb207a5b889ef5870b128a)
+set(DYNAMICHOOKS_ASMJIT_COMMIT 677a10bac2c24f7e068cf1f9e675bf51c7b534ea)   # 1.25.0 (master, 2026-11-04)
+set(DYNAMICHOOKS_ASMJIT_SHA256 0bcc7d502846a307fa72c0fc0bf96a2f1b586a9f4706fe98e03cbb0852cda73c)
 
 FetchContent_Declare(asmjit
     URL https://github.com/asmjit/asmjit/archive/${DYNAMICHOOKS_ASMJIT_COMMIT}.tar.gz
