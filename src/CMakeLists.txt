@@ -13,9 +13,10 @@ add_library(DynamicHooks STATIC
     conventions/x86MsFastcall.cpp
 )
 
-# Users include "hook.h", "conventions/x86MsCdecl.h", ...; the headers include <asmjit/x86.h>.
+# Users include "hook.h", "conventions/x86MsCdecl.h", ...; none of the headers needs AsmJit, so
+# it is linked privately (code using DynamicHooks gets neither its headers nor its C++17 needs).
 target_include_directories(DynamicHooks PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(DynamicHooks PUBLIC asmjit::asmjit)
+target_link_libraries(DynamicHooks PRIVATE asmjit::asmjit)
 set_target_properties(DynamicHooks PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Built without optimisation, as it always has been.

@@ -40,8 +40,6 @@
 #include "registers.h"
 #include "convention.h"
 
-#include <asmjit/x86.h>
-
 
 // ============================================================================
 // >> HookType_t
@@ -61,6 +59,11 @@ enum HookType_t
 // ============================================================================
 class CHook;
 typedef bool (*HookHandlerFn)(HookType_t, CHook*);
+
+// Defined in hook.cpp, so that this header (and code that includes it) doesn't depend on AsmJit:
+// the runtime the generated code lives in, and the assembler that writes it.
+struct CHookJit;
+struct CHookAssembler;
 
 #ifdef __linux__
 #define __cdecl
@@ -152,10 +155,10 @@ public:
 private:
 	bool CreateBridge();
 
-	void Write_ModifyReturnAddress(asmjit::x86::Assembler& a);
-	void Write_CallHandler(asmjit::x86::Assembler& a, HookType_t type, CRegisters* pRegisters);
-	void Write_SaveRegisters(asmjit::x86::Assembler& a, CRegisters* pRegisters);
-	void Write_RestoreRegisters(asmjit::x86::Assembler& a, CRegisters* pRegisters);
+	void Write_ModifyReturnAddress(CHookAssembler& assembler);
+	void Write_CallHandler(CHookAssembler& assembler, HookType_t type, CRegisters* pRegisters);
+	void Write_SaveRegisters(CHookAssembler& assembler, CRegisters* pRegisters);
+	void Write_RestoreRegisters(CHookAssembler& assembler, CRegisters* pRegisters);
 
 	bool CreatePostCallback();
 
@@ -189,7 +192,8 @@ public:
 
 	bool m_bUsePreRegisters;
 
-	asmjit::JitRuntime m_asmjit_rt;
+	// AsmJit's runtime (owns m_pBridge and m_pNewRetAddr)
+	CHookJit* m_pJit;
 };
 
 #endif // _HOOK_H

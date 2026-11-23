@@ -39,6 +39,16 @@
 using namespace asmjit;
 using namespace asmjit::x86;
 
+struct CHookJit
+{
+	JitRuntime rt;
+};
+
+struct CHookAssembler
+{
+	x86::Assembler& a;
+};
+
 
 // ============================================================================
 // >> DEFINITIONS
@@ -78,6 +88,8 @@ CHook::CHook(void* pFunc, ICallingConvention* pConvention)
 	// Save the trampoline
 	m_pTrampoline = (void *) pCopiedBytes;
 
+	m_pJit = new CHookJit;
+
 	// Create the bridge function
 	CreateBridge();
 
@@ -97,8 +109,9 @@ CHook::~CHook()
 	free(m_pTrampoline);
 
 	// Free the asm bridge and new return address
-	m_asmjit_rt.release(m_pBridge);
-	m_asmjit_rt.release(m_pNewRetAddr);
+	m_pJit->rt.release(m_pBridge);
+	m_pJit->rt.release(m_pNewRetAddr);
+	delete m_pJit;
 	
 	delete m_pRegistersPre;
 	delete m_pRegistersPost;
@@ -174,20 +187,21 @@ void __cdecl CHook::SetReturnAddress(void* pRetAddr, void* pESP)
 bool CHook::CreateBridge()
 {
 	CodeHolder code;
-	code.init(m_asmjit_rt.environment(), m_asmjit_rt.cpuFeatures());
+	code.init(m_pJit->rt.environment(), m_pJit->rt.cpuFeatures());
 	x86::Assembler a(&code);
+	CHookAssembler assembler{a};
 
 	Label label_override = a.newLabel();
 
 	// Write a redirect to the post-hook code
-	Write_ModifyReturnAddress(a);
+	Write_ModifyReturnAddress(assembler);
 
 	// Call the pre-hook handler and jump to label_override if true was returned
-	Write_CallHandler(a, HOOKTYPE_PRE, m_pRegistersPre);
+	Write_CallHandler(assembler, HOOKTYPE_PRE, m_pRegistersPre);
 	a.cmp(eax, true);
 	
 	// Restore the previously saved registers, so any changes will be applied
-	Write_RestoreRegisters(a, m_pRegistersPre);
+	Write_RestoreRegisters(assembler, m_pRegistersPre);
 
 	a.je(label_override);
 
@@ -201,11 +215,12 @@ bool CHook::CreateBridge()
 	// This will still call post hooks, but will skip the original function.
 	a.ret(imm(m_pCallingConvention->GetPopSize()));
 
-	return m_asmjit_rt.add(&m_pBridge, &code);
+	return m_pJit->rt.add(&m_pBridge, &code);
 }
 
-void CHook::Write_ModifyReturnAddress(x86::Assembler& a)
+void CHook::Write_ModifyReturnAddress(CHookAssembler& assembler)
 {
+	x86::Assembler& a = assembler.a;
 	// Save scratch registers that are used by SetReturnAddress
 	static void* pEAX = NULL;
 	static void* pECX = NULL;
@@ -239,8 +254,9 @@ void CHook::Write_ModifyReturnAddress(x86::Assembler& a)
 bool CHook::CreatePostCallback()
 {
 	CodeHolder code;
-	code.init(m_asmjit_rt.environment(), m_asmjit_rt.cpuFeatures());
+	code.init(m_pJit->rt.environment(), m_pJit->rt.cpuFeatures());
 	x86::Assembler a(&code);
+	CHookAssembler assembler{a};
 
 	int iPopSize = m_pCallingConvention->GetPopSize();
 
@@ -249,10 +265,10 @@ bool CHook::CreatePostCallback()
 	a.sub(esp, imm(iPopSize+4));
 
 	// Call the post-hook handler
-	Write_CallHandler(a, HOOKTYPE_POST, m_pRegistersPost);
+	Write_CallHandler(assembler, HOOKTYPE_POST, m_pRegistersPost);
 
 	// Restore the previously saved registers, so any changes will be applied
-	Write_RestoreRegisters(a, m_pRegistersPost);
+	Write_RestoreRegisters(assembler, m_pRegistersPost);
 
 	// Save scratch registers that are used by GetReturnAddress
 	static void* pEAX = NULL;
@@ -286,15 +302,16 @@ bool CHook::CreatePostCallback()
 	a.jmp(dword_ptr_abs((uint64_t) &pRetAddr));
 
 	// Generate the code
-	return m_asmjit_rt.add(&m_pNewRetAddr, &code);
+	return m_pJit->rt.add(&m_pNewRetAddr, &code);
 }
 
-void CHook::Write_CallHandler(x86::Assembler& a, HookType_t type, CRegisters* pRegisters)
+void CHook::Write_CallHandler(CHookAssembler& assembler, HookType_t type, CRegisters* pRegisters)
 {
+	x86::Assembler& a = assembler.a;
 	bool (__cdecl CHook::*HookHandler)(HookType_t) = &CHook::HookHandler;
 
 	// Save the registers so that we can access them in our handlers
-	Write_SaveRegisters(a, pRegisters);
+	Write_SaveRegisters(assembler, pRegisters);
 
 	// Call the global hook handler
 	// Subtract 4 bytes to preserve 16-Byte stack alignment for Linux
@@ -305,8 +322,9 @@ void CHook::Write_CallHandler(x86::Assembler& a, HookType_t type, CRegisters* pR
 	a.add(esp, 12);
 }
 
-void CHook::Write_SaveRegisters(x86::Assembler& a, CRegisters* pRegisters)
+void CHook::Write_SaveRegisters(CHookAssembler& assembler, CRegisters* pRegisters)
 {
+	x86::Assembler& a = assembler.a;
 	std::list<Register_t> vecRegistersToSave = m_pCallingConvention->GetRegisters();
 	for(std::list<Register_t>::iterator it=vecRegistersToSave.begin(); it != vecRegistersToSave.end(); it++)
 	{
@@ -410,8 +428,9 @@ void CHook::Write_SaveRegisters(x86::Assembler& a, CRegisters* pRegisters)
 	}
 }
 
-void CHook::Write_RestoreRegisters(x86::Assembler& a, CRegisters* pRegisters)
+void CHook::Write_RestoreRegisters(CHookAssembler& assembler, CRegisters* pRegisters)
 {
+	x86::Assembler& a = assembler.a;
 	std::list<Register_t> vecRegistersToSave = m_pCallingConvention->GetRegisters();
 	for(std::list<Register_t>::iterator it=vecRegistersToSave.begin(); it != vecRegistersToSave.end(); it++)
 	{
