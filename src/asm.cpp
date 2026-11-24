@@ -48,6 +48,7 @@
 #define REG_ECX			1
 #define REG_EDX			2
 #define REG_EBX			3
+#define REG_ESP			4
 
 #define IA32_MOV_REG_IMM		0xB8	// encoding is +r <imm32>
 #endif
@@ -70,44 +71,20 @@ void check_thunks(unsigned char *dest, unsigned char *pc)
 	unsigned char *calloffset = *(unsigned char **)writeaddr;
 	unsigned char *calladdr = (unsigned char *)(dest + (intptr_t)calloffset);
 
-	/* Lookup name of function being called */
-	if ((*calladdr == 0x8B) && (*(calladdr+2) == 0x24) && (*(calladdr+3) == 0xC3))
+	/*
+	 * A thunk is "mov <reg>, [esp]; ret": 8B /r with ModRM 00 reg 100, then SIB 24 (no index,
+	 * base esp), then C3. reg is any register but esp (the thunks GCC emits: eax, ebx, ecx, edx,
+	 * esi, edi, ebp).
+	 */
+	unsigned char modrm = *(calladdr+1);
+	if ((*calladdr == 0x8B) && ((modrm & 0xC7) == 0x04) && (*(calladdr+2) == 0x24) && (*(calladdr+3) == 0xC3)
+		&& ((modrm >> 3) & 7) != REG_ESP)
 	{
-		//a thunk maybe?
-		char movByte = IA32_MOV_REG_IMM;
-
-		/* Calculate the correct mov opcode */
-		switch (*(calladdr+1))
-		{
-		case 0x04:
-			{
-				movByte += REG_EAX;
-				break;
-			}
-		case 0x1C:
-			{
-				movByte += REG_EBX;
-				break;
-			}
-		case 0x0C:
-			{
-				movByte += REG_ECX;
-				break;
-			}
-		case 0x14:
-			{
-				movByte += REG_EDX;
-				break;
-			}
-		default:
-			{
-				break;
-			}
-		}
+		/* mov <reg>, imm32 */
+		unsigned char movByte = IA32_MOV_REG_IMM + ((modrm >> 3) & 7);
 
 		/* Move our write address back one to where the call opcode was */
 		writeaddr--;
-
 
 		/* Write our mov */
 		*writeaddr = movByte;

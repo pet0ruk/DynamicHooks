@@ -7,7 +7,7 @@ if(MSVC)
     set(_tests ms_cdecl1 ms_cdecl2 ms_thiscall1 ms_thiscall2 ms_stdcall1 ms_stdcall2
                ms_fastcall1 ms_fastcall2)
 else()
-    set(_tests gcc_cdecl1 gcc_cdecl2 gcc_thiscall1 gcc_thiscall2)
+    set(_tests gcc_cdecl1 gcc_cdecl2 gcc_thiscall1 gcc_thiscall2 gcc_pic_thunks)
 endif()
 
 foreach(_test ${_tests})
