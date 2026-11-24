@@ -2,8 +2,31 @@
 # Tests: each program hooks a function of one calling convention, checks the arguments and
 # return values its pre- and post-hooks see and set, and exits non-zero (assert) on a mismatch.
 # Run with ctest. The ms_* tests are for MSVC (Windows), the gcc_* ones for GCC (Linux);
-# patching (machine code in executable memory) and conventions are for both.
+# patching (machine code in executable memory) and conventions are for both. x86-64 builds
+# run x86_64.cpp instead, once per return type.
 # =============================================================================
+function(dynamichooks_test _name _source)
+    add_executable(test_${_name} ${_source})
+    target_link_libraries(test_${_name} PRIVATE DynamicHooks)
+    target_compile_definitions(test_${_name} PRIVATE ${ARGN})
+    # Unoptimised, so the hooked functions stay real calls, and with assert() enabled in every
+    # configuration (Release defines NDEBUG).
+    if(MSVC)
+        target_compile_options(test_${_name} PRIVATE /Od /Ob0 /UNDEBUG)
+    else()
+        target_compile_options(test_${_name} PRIVATE -O0 -UNDEBUG)
+    endif()
+    add_test(NAME ${_name} COMMAND test_${_name})
+endfunction()
+
+if(DYNAMICHOOKS_X86_64)
+    foreach(_type int long_long float double pointer)
+        string(TOUPPER ${_type} _TYPE)
+        dynamichooks_test(x86_64_${_type} x86_64.cpp DH_TEST_RETURN_${_TYPE})
+    endforeach()
+    return()
+endif()
+
 set(_tests patching)
 if(MSVC)
     list(APPEND _tests ms_cdecl1 ms_cdecl2 ms_thiscall1 ms_thiscall2 ms_stdcall1 ms_stdcall2

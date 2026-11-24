@@ -33,6 +33,15 @@
 // ============================================================================
 #include "registers.h"
 
+// The build's DYNAMICHOOKS_X86_64 option (src/CMakeLists.txt) must match the compiler's target.
+#if defined(DYNAMICHOOKS_BUILD_X86_64)
+	#if DYNAMICHOOKS_BUILD_X86_64 && !defined(DYNAMICHOOKS_X86_64)
+		#error "DYNAMICHOOKS_X86_64 is ON, but the compiler targets 32-bit x86"
+	#elif !DYNAMICHOOKS_BUILD_X86_64 && defined(DYNAMICHOOKS_X86_64)
+		#error "DYNAMICHOOKS_X86_64 is OFF, but the compiler targets x86-64"
+	#endif
+#endif
+
 
 // ============================================================================
 // >> GetRegisterSize
@@ -51,8 +60,12 @@ int GetRegisterSize(Register_t reg)
 		return SIZE_XMMWORD;
 	if (reg <= GS)
 		return SIZE_WORD;
+	if (reg <= ST7)
+		return SIZE_TWORD;
+	if (reg <= R15)
+		return SIZE_QWORD;
 
-	return SIZE_TWORD;
+	return SIZE_XMMWORD;
 }
 
 
