@@ -34,8 +34,11 @@
 #include "hook.h"
 #include "utilities.h"
 #include "asm.h"
+#include "trampoline.h"
 
 #include <asmjit/x86.h>
+#include <algorithm>
+#include <string.h>
 using namespace asmjit;
 using namespace asmjit::x86;
 
@@ -51,12 +54,6 @@ struct CHookAssembler
 
 
 // ============================================================================
-// >> DEFINITIONS
-// ============================================================================
-#define JMP_SIZE 6
-
-
-// ============================================================================
 // >> CHook
 // ============================================================================
 CHook::CHook(void* pFunc, ICallingConvention* pConvention)
@@ -65,52 +62,71 @@ CHook::CHook(void* pFunc, ICallingConvention* pConvention)
 	m_pRegistersPre = new CRegisters(pConvention->GetRegisters());
 	m_pRegistersPost = new CRegisters(pConvention->GetRegisters());
 	m_pCallingConvention = pConvention;
-
-	unsigned char* pTarget = (unsigned char *) pFunc;
-
-	// Determine the number of bytes we need to copy
-	int iBytesToCopy = copy_bytes(pTarget, NULL, JMP_SIZE);
-
-	// Create an array for the bytes to copy + a jump to the rest of the
-	// function.
-	unsigned char* pCopiedBytes = new unsigned char[iBytesToCopy + JMP_SIZE];
-
-	// Fill the array with NOP instructions
-	memset(pCopiedBytes, 0x90, iBytesToCopy + JMP_SIZE);
-
-	// Copy the required bytes to our array
-	SetMemPatchable(pCopiedBytes, iBytesToCopy + JMP_SIZE);
-	copy_bytes(pTarget, pCopiedBytes, JMP_SIZE);
-
-	// Write a jump after the copied bytes to the function/bridge + number of bytes to copy
-	WriteJMP(pCopiedBytes + iBytesToCopy, pTarget + iBytesToCopy);
-
-	// Save the trampoline
-	m_pTrampoline = (void *) pCopiedBytes;
-
+	m_pBridge = NULL;
+	m_pTrampoline = NULL;
+	m_pNewRetAddr = NULL;
+	m_bUsePreRegisters = false;
 	m_pJit = new CHookJit;
+}
 
-	// Create the bridge function
-	CreateBridge();
+bool CHook::Install()
+{
+	unsigned char* pTarget = (unsigned char *) m_pFunc;
+	JitAllocator& allocator = m_pJit->rt.allocator();
 
-	// Write a jump to the bridge
-	WriteJMP((unsigned char *) pFunc, m_pBridge);
+	// Build the trampoline (the instructions the jump to the bridge replaces, then a jump to the
+	// rest of the function) once to learn its size, then for the memory allocated for it.
+	std::vector<unsigned char> code;
+	size_t iSourceSize;
+	if (!BuildTrampoline(pTarget, OP_JMP_SIZE, 0, code, iSourceSize))
+		return false;
+
+	JitAllocator::Span span;
+	if (allocator.alloc(Out(span), code.size()) != Error::kOk)
+		return false;
+
+	m_pTrampoline = span.rx();
+	if (!BuildTrampoline(pTarget, OP_JMP_SIZE, (uintptr_t) span.rx(), code, iSourceSize)
+		|| allocator.write(span, 0, code.data(), code.size()) != Error::kOk)
+	{
+		return false;
+	}
+
+	if (!CreateBridge())
+		return false;
+
+	// Jump to the bridge; the rest of the replaced bytes become nops.
+	std::vector<unsigned char> patch(iSourceSize, OP_NOP);
+	int32_t iOffset = (int32_t) ((uintptr_t) m_pBridge - ((uintptr_t) pTarget + OP_JMP_SIZE));
+	patch[0] = OP_JMP;
+	memcpy(&patch[1], &iOffset, sizeof(iOffset));
+
+	m_OriginalBytes.assign(pTarget, pTarget + iSourceSize);
+	if (!PatchCode(pTarget, patch.data(), patch.size()))
+	{
+		m_OriginalBytes.clear();
+		return false;
+	}
 
 	// Flag the convention as hooked and being taken care of
 	m_pCallingConvention->m_bHooked = true;
+	return true;
 }
 
 CHook::~CHook()
 {
-	// Copy back the previously copied bytes
-	copy_bytes((unsigned char *) m_pTrampoline, (unsigned char *) m_pFunc, JMP_SIZE);
+	// Restore the function (if Install() patched it)
+	if (!m_OriginalBytes.empty())
+		PatchCode(m_pFunc, m_OriginalBytes.data(), m_OriginalBytes.size());
 
-	// Free the trampoline array
-	free(m_pTrampoline);
-
-	// Free the asm bridge and new return address
-	m_pJit->rt.release(m_pBridge);
-	m_pJit->rt.release(m_pNewRetAddr);
+	// Free the trampoline, the asm bridge and new return address
+	JitAllocator& allocator = m_pJit->rt.allocator();
+	if (m_pTrampoline)
+		allocator.release(m_pTrampoline);
+	if (m_pBridge)
+		allocator.release(m_pBridge);
+	if (m_pNewRetAddr)
+		allocator.release(m_pNewRetAddr);
 	delete m_pJit;
 	
 	delete m_pRegistersPre;
@@ -135,13 +151,11 @@ void CHook::RemoveCallback(HookType_t eHookType, HookHandlerFn* pCallback)
 
 bool CHook::IsCallbackRegistered(HookType_t eHookType, HookHandlerFn* pCallback)
 {
-	std::list<HookHandlerFn *> callbacks = m_hookHandler[eHookType];
-	for(std::list<HookHandlerFn *>::iterator it=callbacks.begin(); it != callbacks.end(); it++)
-	{
-		if (*it == pCallback)
-			return true;
-	}
-	return false;
+	std::map<HookType_t, std::list<HookHandlerFn *> >::iterator it = m_hookHandler.find(eHookType);
+	if (it == m_hookHandler.end())
+		return false;
+
+	return std::find(it->second.begin(), it->second.end(), pCallback) != it->second.end();
 }
 
 
@@ -158,10 +172,15 @@ bool CHook::HookHandler(HookType_t eHookType)
 	m_bUsePreRegisters = (eHookType == HOOKTYPE_PRE);
 
 	bool bOverride = false;
-	std::list<HookHandlerFn *> callbacks = this->m_hookHandler[eHookType];
-	for(std::list<HookHandlerFn *>::iterator it=callbacks.begin(); it != callbacks.end(); it++)
+	std::map<HookType_t, std::list<HookHandlerFn *> >::iterator it = m_hookHandler.find(eHookType);
+	if (it == m_hookHandler.end() || it->second.empty())
+		return false;
+
+	// Iterate over a copy: a handler may add or remove handlers.
+	std::vector<HookHandlerFn *> callbacks(it->second.begin(), it->second.end());
+	for (size_t i = 0; i < callbacks.size(); i++)
 	{
-		bool result = ((HookHandlerFn) *it)(eHookType, this);
+		bool result = ((HookHandlerFn) callbacks[i])(eHookType, this);
 		if (result)
 			bOverride = true;
 	}
@@ -220,7 +239,7 @@ bool CHook::CreateBridge()
 	// This will still call post hooks, but will skip the original function.
 	a.ret(imm(m_pCallingConvention->GetPopSize()));
 
-	return m_pJit->rt.add(&m_pBridge, &code) == Error::kOk;
+	return m_pNewRetAddr && m_pJit->rt.add(&m_pBridge, &code) == Error::kOk;
 }
 
 void CHook::Write_ModifyReturnAddress(CHookAssembler& assembler)
@@ -252,6 +271,7 @@ void CHook::Write_ModifyReturnAddress(CHookAssembler& assembler)
 	a.mov(edx, dword_ptr_abs((uint64_t) &pEDX));
 
 	// Override the return address. This is a redirect to our post-hook code
+	// (CreateBridge fails if it couldn't be created)
 	CreatePostCallback();
 	a.mov(dword_ptr(esp), imm(m_pNewRetAddr));
 }

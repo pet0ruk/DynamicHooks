@@ -1,13 +1,15 @@
 # =============================================================================
 # Tests: each program hooks a function of one calling convention, checks the arguments and
 # return values its pre- and post-hooks see and set, and exits non-zero (assert) on a mismatch.
-# Run with ctest. The ms_* tests are for MSVC (Windows), the gcc_* ones for GCC (Linux).
+# Run with ctest. The ms_* tests are for MSVC (Windows), the gcc_* ones for GCC (Linux);
+# patching (machine code in executable memory) and conventions are for both.
 # =============================================================================
+set(_tests patching)
 if(MSVC)
-    set(_tests ms_cdecl1 ms_cdecl2 ms_thiscall1 ms_thiscall2 ms_stdcall1 ms_stdcall2
+    list(APPEND _tests ms_cdecl1 ms_cdecl2 ms_thiscall1 ms_thiscall2 ms_stdcall1 ms_stdcall2
                ms_fastcall1 ms_fastcall2)
 else()
-    set(_tests gcc_cdecl1 gcc_cdecl2 gcc_thiscall1 gcc_thiscall2 gcc_pic_thunks)
+    list(APPEND _tests gcc_cdecl1 gcc_cdecl2 gcc_thiscall1 gcc_thiscall2 gcc_pic_thunks)
 endif()
 
 foreach(_test ${_tests})

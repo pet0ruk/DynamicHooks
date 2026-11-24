@@ -48,7 +48,10 @@ public:
 	/*
 	Hooks the given function and returns a new CHook instance. If the
 	function was already hooked, the existing CHook instance will be
-	returned.
+	returned (and <pConvention> is deleted).
+
+	Returns NULL if the function can't be hooked (see CHook::Install). The
+	caller then still owns <pConvention>.
 	*/
     CHook* HookFunction(void* pFunc, ICallingConvention* pConvention);
 	

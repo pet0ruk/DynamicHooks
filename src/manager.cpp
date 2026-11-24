@@ -50,6 +50,14 @@ CHook* CHookManager::HookFunction(void* pFunc, ICallingConvention* pConvention)
 	}
 	
 	pHook = new CHook(pFunc, pConvention);
+	if (!pHook->Install())
+	{
+		// The caller keeps the convention.
+		pHook->m_pCallingConvention = NULL;
+		delete pHook;
+		return NULL;
+	}
+
 	m_Hooks.push_back(pHook);
 	return pHook;
 }
