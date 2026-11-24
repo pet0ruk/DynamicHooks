@@ -6,6 +6,7 @@ add_library(DynamicHooks STATIC
     hook.cpp
     manager.cpp
     registers.cpp
+    trampoline.cpp
     utilities.cpp
     conventions/x86MsCdecl.cpp
     conventions/x86MsThiscall.cpp
@@ -18,10 +19,3 @@ add_library(DynamicHooks STATIC
 target_include_directories(DynamicHooks PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(DynamicHooks PRIVATE asmjit::asmjit)
 set_target_properties(DynamicHooks PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-# Built without optimisation, as it always has been.
-if(MSVC)
-    target_compile_options(DynamicHooks PRIVATE /Od /Ob0)
-else()
-    target_compile_options(DynamicHooks PRIVATE -O0)
-endif()

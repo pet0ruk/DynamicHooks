@@ -36,6 +36,7 @@
 // ============================================================================
 #include <list>
 #include <map>
+#include <vector>
 
 #include "registers.h"
 #include "convention.h"
@@ -89,6 +90,13 @@ private:
 	*/
 	CHook(void* pFunc, ICallingConvention* pConvention);
 	~CHook();
+
+	/*
+	Patches the function to jump to the hook. Returns false, leaving the function unchanged, if
+	its start can't be moved to a trampoline (see BuildTrampoline in trampoline.h) or memory for
+	the hook can't be allocated or written.
+	*/
+	bool Install();
 
 public:
 	/*
@@ -195,7 +203,10 @@ public:
 
 	bool m_bUsePreRegisters;
 
-	// AsmJit's runtime (owns m_pBridge and m_pNewRetAddr)
+	// The bytes of the function the hook's jump replaced, restored when unhooking.
+	std::vector<unsigned char> m_OriginalBytes;
+
+	// AsmJit's runtime (owns m_pTrampoline, m_pBridge and m_pNewRetAddr)
 	CHookJit* m_pJit;
 };
 

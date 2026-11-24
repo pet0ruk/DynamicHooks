@@ -28,13 +28,26 @@
 * Idea and trampoline code taken from DynDetours (thanks your-name-here).
 */
 
+
 #ifndef _UTILITIES_H
 #define _UTILITIES_H
 
 // ============================================================================
+// >> INCLUDES
+// ============================================================================
+#include <stddef.h>
+#include <stdint.h>
+
+
+// ============================================================================
 // >> FUNCTIONS
 // ============================================================================
-void SetMemPatchable(void* pAddr, size_t size);
-void WriteJMP(unsigned char* src, void* dest);
+/*
+Copies <size> bytes from <pSrc> to <pDest> in code (or other read-only) memory: makes every page
+they are on writable, writes them and restores each page's previous protection.
+
+Returns false (writing nothing) if a page isn't mapped or can't be made writable.
+*/
+bool PatchCode(void* pDest, const void* pSrc, size_t size);
 
 #endif // _UTILITIES_H

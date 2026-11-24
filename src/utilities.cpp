@@ -31,40 +31,155 @@
 // ============================================================================
 // >> INCLUDES
 // ============================================================================
+#include "utilities.h"
+
+#include <string.h>
+#include <vector>
+
 #ifdef _WIN32
 	#include <windows.h>
 #endif
 
 #ifdef __linux__
+	#include <stdio.h>
 	#include <sys/mman.h>
 	#include <unistd.h>
-	#define PAGE_SIZE 4096
-	#define ALIGN(ar) ((long)ar & ~(PAGE_SIZE-1))
-	#define PAGE_EXECUTE_READWRITE PROT_READ|PROT_WRITE|PROT_EXEC
 #endif
 
-#include "asm.h"
-
 
 // ============================================================================
-// >> ParseParams
+// >> Page protection
 // ============================================================================
-void SetMemPatchable(void* pAddr, size_t size)
+#ifdef __linux__
+struct CMapping
 {
-#if defined __linux__
-	mprotect((void *) ALIGN(pAddr), sysconf(_SC_PAGESIZE), PAGE_EXECUTE_READWRITE);
-#elif defined _WIN32
-	DWORD old_prot;
-	VirtualProtect(pAddr, size, PAGE_EXECUTE_READWRITE, &old_prot);
-#endif
+	uintptr_t start;
+	uintptr_t end;
+	int prot;
+};
+
+// Reads the mappings of this process and their protection from /proc/self/maps.
+static bool ReadMappings(std::vector<CMapping>& mappings)
+{
+	FILE* file = fopen("/proc/self/maps", "r");
+	if (!file)
+		return false;
+
+	char line[512];
+	while (fgets(line, sizeof(line), file))
+	{
+		unsigned long start, end;
+		char perms[5];
+		if (sscanf(line, "%lx-%lx %4s", &start, &end, perms) != 3)
+			continue;
+
+		CMapping mapping;
+		mapping.start = start;
+		mapping.end = end;
+		mapping.prot = (perms[0] == 'r' ? PROT_READ : 0) | (perms[1] == 'w' ? PROT_WRITE : 0)
+			| (perms[2] == 'x' ? PROT_EXEC : 0);
+		mappings.push_back(mapping);
+	}
+
+	fclose(file);
+	return true;
 }
 
+static bool GetPageProtection(const std::vector<CMapping>& mappings, uintptr_t page, int& prot)
+{
+	for (size_t i = 0; i < mappings.size(); i++)
+	{
+		if (page >= mappings[i].start && page < mappings[i].end)
+		{
+			prot = mappings[i].prot;
+			return true;
+		}
+	}
+	return false;
+}
+#endif
+
 
 // ============================================================================
-// >> WriteJMP
+// >> PatchCode
 // ============================================================================
-void WriteJMP(unsigned char* src, void* dest)
+bool PatchCode(void* pDest, const void* pSrc, size_t size)
 {
-	SetMemPatchable(src, 20);
-	inject_jmp((void *)src, dest);
+	if (!size)
+		return true;
+
+#if defined __linux__
+	uintptr_t iPageSize = (uintptr_t) sysconf(_SC_PAGESIZE);
+	uintptr_t iFirst = (uintptr_t) pDest & ~(iPageSize - 1);
+	uintptr_t iEnd = ((uintptr_t) pDest + size + iPageSize - 1) & ~(iPageSize - 1);
+
+	std::vector<CMapping> mappings;
+	if (!ReadMappings(mappings))
+		return false;
+
+	// The protection of every page the bytes are on (they may span more than one).
+	std::vector<int> prots;
+	for (uintptr_t page = iFirst; page < iEnd; page += iPageSize)
+	{
+		int prot;
+		if (!GetPageProtection(mappings, page, prot))
+			return false;
+
+		prots.push_back(prot);
+	}
+
+	// Make them writable (keeping them executable: other threads may be running code there).
+	size_t iUnprotected = 0;
+	for (; iUnprotected < prots.size(); iUnprotected++)
+	{
+		void* page = (void *) (iFirst + iUnprotected * iPageSize);
+		if (mprotect(page, iPageSize, prots[iUnprotected] | PROT_READ | PROT_WRITE) != 0)
+			break;
+	}
+
+	bool bResult = iUnprotected == prots.size();
+	if (bResult)
+		memcpy(pDest, pSrc, size);
+
+	// Restore the previous protection.
+	for (size_t i = 0; i < iUnprotected; i++)
+		mprotect((void *) (iFirst + i * iPageSize), iPageSize, prots[i]);
+
+	return bResult;
+
+#elif defined _WIN32
+	SYSTEM_INFO info;
+	GetSystemInfo(&info);
+	uintptr_t iPageSize = info.dwPageSize;
+	uintptr_t iFirst = (uintptr_t) pDest & ~(iPageSize - 1);
+	uintptr_t iEnd = ((uintptr_t) pDest + size + iPageSize - 1) & ~(iPageSize - 1);
+
+	// VirtualProtect returns the previous protection of the first page only, so do it per page.
+	std::vector<DWORD> prots;
+	bool bResult = true;
+	for (uintptr_t page = iFirst; page < iEnd; page += iPageSize)
+	{
+		DWORD old;
+		if (!VirtualProtect((void *) page, 1, PAGE_EXECUTE_READWRITE, &old))
+		{
+			bResult = false;
+			break;
+		}
+		prots.push_back(old);
+	}
+
+	if (bResult)
+	{
+		memcpy(pDest, pSrc, size);
+		FlushInstructionCache(GetCurrentProcess(), pDest, size);
+	}
+
+	for (size_t i = 0; i < prots.size(); i++)
+	{
+		DWORD old;
+		VirtualProtect((void *) (iFirst + i * iPageSize), 1, prots[i], &old);
+	}
+
+	return bResult;
+#endif
 }
