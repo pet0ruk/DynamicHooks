@@ -28,8 +28,8 @@
 // ============================================================================
 #include "trampoline.h"
 #include "asm.h"
+#include "utilities.h"
 
-#include <string.h>
 
 
 // ============================================================================
@@ -50,17 +50,10 @@ static bool IsPrefix(unsigned char byte)
 	return false;
 }
 
-static int32_t ReadInt32(const unsigned char* p)
-{
-	int32_t value;
-	memcpy(&value, p, sizeof(value));
-	return value;
-}
-
 static void EmitInt32(std::vector<unsigned char>& code, uint32_t value)
 {
 	unsigned char bytes[4];
-	memcpy(bytes, &value, sizeof(bytes));
+	WriteInt32(bytes, static_cast<int32_t>(value));
 	code.insert(code.end(), bytes, bytes + 4);
 }
 
@@ -68,7 +61,7 @@ static void EmitInt32(std::vector<unsigned char>& code, uint32_t value)
 static void EmitRel32(std::vector<unsigned char>& code, uintptr_t iDest, const unsigned char* target)
 {
 	uintptr_t next = iDest + code.size() + 4;
-	EmitInt32(code, (uint32_t) ((uintptr_t) target - next));
+	EmitInt32(code, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(target) - next));
 }
 
 /*
@@ -129,7 +122,7 @@ bool BuildTrampoline(unsigned char* pFunc, size_t iMinSize, uintptr_t iDest,
 			return false;
 
 		size_t iLength;
-		const unsigned char* target = NULL;
+		const unsigned char* target = nullptr;
 		if (op == 0xE8 || op == 0xE9)
 		{
 			// call/jmp rel32
@@ -139,9 +132,9 @@ bool BuildTrampoline(unsigned char* pFunc, size_t iMinSize, uintptr_t iDest,
 			if (reg != -1)
 			{
 				// mov <reg>, <the address after the original call>
-				code.push_back((unsigned char) (0xB8 + reg));
-				EmitInt32(code, (uint32_t) (uintptr_t) (q + 5));
-				target = NULL;
+				code.push_back(static_cast<unsigned char>(0xB8 + reg));
+				EmitInt32(code, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(q + 5)));
+				target = nullptr;
 			}
 			else
 			{
@@ -156,7 +149,7 @@ bool BuildTrampoline(unsigned char* pFunc, size_t iMinSize, uintptr_t iDest,
 		{
 			// jmp rel8 -> jmp rel32
 			iLength = 2;
-			target = q + 2 + (int8_t) q[1];
+			target = q + 2 + static_cast<int8_t>(q[1]);
 			code.push_back(0xE9);
 			EmitRel32(code, iDest, target);
 			bEnded = true;
@@ -165,9 +158,9 @@ bool BuildTrampoline(unsigned char* pFunc, size_t iMinSize, uintptr_t iDest,
 		{
 			// jcc rel8 -> jcc rel32
 			iLength = 2;
-			target = q + 2 + (int8_t) q[1];
+			target = q + 2 + static_cast<int8_t>(q[1]);
 			code.push_back(0x0F);
-			code.push_back((unsigned char) (0x80 | (op & 0x0F)));
+			code.push_back(static_cast<unsigned char>(0x80 | (op & 0x0F)));
 			EmitRel32(code, iDest, target);
 		}
 		else if (op == 0x0F && (q[1] & 0xF0) == 0x80)
@@ -186,7 +179,7 @@ bool BuildTrampoline(unsigned char* pFunc, size_t iMinSize, uintptr_t iDest,
 		}
 		else
 		{
-			iLength = copy_bytes(p, NULL, 1);
+			iLength = GetInstructionLength(p);
 			if (iLength == 0)
 				return false;
 

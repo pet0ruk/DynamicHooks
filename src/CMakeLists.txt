@@ -8,6 +8,7 @@ add_library(DynamicHooks STATIC
     registers.cpp
     trampoline.cpp
     utilities.cpp
+    conventions/x86Convention.cpp
     conventions/x86MsCdecl.cpp
     conventions/x86MsThiscall.cpp
     conventions/x86MsStdcall.cpp

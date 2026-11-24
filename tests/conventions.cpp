@@ -266,22 +266,22 @@ int main()
 #if defined(DH_TEST_THISCALL)
 	ret_t (CC_THISCALL MyClass::*pMyFunc)(int, float, short, double, long long) = &MyClass::MyFunc;
 	CHook* pHook = pHookMngr->HookFunction((void *&) pMyFunc,
-		new THISCALL_CONVENTION(vecArgTypes, RETURN_TYPE));
+		std::make_shared<THISCALL_CONVENTION>(vecArgTypes, RETURN_TYPE));
 #elif defined(DH_TEST_STDCALL)
 	CHook* pHook = pHookMngr->HookFunction((void *) &MyFunc,
-		new x86MsStdcall(vecArgTypes, RETURN_TYPE));
+		std::make_shared<x86MsStdcall>(vecArgTypes, RETURN_TYPE));
 #elif defined(DH_TEST_FASTCALL)
 	CHook* pHook = pHookMngr->HookFunction((void *) &MyFunc,
-		new x86MsFastcall(vecArgTypes, RETURN_TYPE));
+		std::make_shared<x86MsFastcall>(vecArgTypes, RETURN_TYPE));
 #else
 	CHook* pHook = pHookMngr->HookFunction((void *) &MyFunc,
-		new CDECL_CONVENTION(vecArgTypes, RETURN_TYPE));
+		std::make_shared<CDECL_CONVENTION>(vecArgTypes, RETURN_TYPE));
 #endif
 	assert(X87Depth() == 0);
 
 	// 1. Arguments and return value changed by the hooks
-	pHook->AddCallback(HOOKTYPE_PRE, (HookHandlerFn *) (void *) &PreMyFunc);
-	pHook->AddCallback(HOOKTYPE_POST, (HookHandlerFn *) (void *) &PostMyFunc);
+	pHook->AddCallback(HOOKTYPE_PRE, &PreMyFunc);
+	pHook->AddCallback(HOOKTYPE_POST, &PostMyFunc);
 	g_bArgumentsChanged = true;
 	g_PostExpects = RET_ORIGINAL;
 	for (int i = 1; i <= 3; i++)
@@ -293,8 +293,8 @@ int main()
 	}
 
 	// 2. The function skipped by the pre-hook
-	pHook->RemoveCallback(HOOKTYPE_PRE, (HookHandlerFn *) (void *) &PreMyFunc);
-	pHook->AddCallback(HOOKTYPE_PRE, (HookHandlerFn *) (void *) &PreMyFuncOverride);
+	pHook->RemoveCallback(HOOKTYPE_PRE, &PreMyFunc);
+	pHook->AddCallback(HOOKTYPE_PRE, &PreMyFuncOverride);
 	g_PostExpects = RET_PRE;
 	for (int i = 1; i <= 3; i++)
 	{

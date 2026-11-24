@@ -86,8 +86,8 @@ static void Test(int (*pFunc)(), char* pExpected)
 
 	CHookManager* pHookMngr = GetHookManager();
 	std::vector<DataType_t> vecArgTypes;
-	CHook* pHook = pHookMngr->HookFunction((void *) pFunc, new x86GccCdecl(vecArgTypes, DATA_TYPE_INT));
-	pHook->AddCallback(HOOKTYPE_PRE, (HookHandlerFn *) (void *) &PreFunc);
+	CHook* pHook = pHookMngr->HookFunction((void *) pFunc, std::make_shared<x86GccCdecl>(vecArgTypes, DATA_TYPE_INT));
+	pHook->AddCallback(HOOKTYPE_PRE, &PreFunc);
 
 	int iBefore = g_iPreCallCount;
 	assert(pFunc() == (int) pExpected);

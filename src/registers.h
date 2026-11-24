@@ -31,18 +31,20 @@
 #ifndef _REGISTERS_H
 #define _REGISTERS_H
 
-
 // ============================================================================
 // >> INCLUDES
 // ============================================================================
-#include <stdlib.h>
-#include <list>
+#include <array>
+#include <memory>
+#include <string.h>
+#include <vector>
 
 
 // ============================================================================
 // >> RegisterSize
 // ============================================================================
-enum RegisterSize {
+enum RegisterSize
+{
 	SIZE_INVALID = 0,
 	SIZE_BYTE = 1,
 	SIZE_WORD = 2,
@@ -60,232 +62,118 @@ enum RegisterSize {
 // ============================================================================
 enum Register_t
 {
-	// ========================================================================
-	// >> 8-bit General purpose registers
-	// ========================================================================
-	AL,
-	CL,
-	DL,
-	BL,
-	AH,
-	CH,
-	DH,
-	BH,
+	// 8-bit general purpose registers
+	AL, CL, DL, BL, AH, CH, DH, BH,
 
-	// ========================================================================
-	// >> 16-bit General purpose registers
-	// ========================================================================
-	AX,
-	CX,
-	DX,
-	BX,
-	SP,
-	BP,
-	SI,
-	DI,
+	// 16-bit general purpose registers
+	AX, CX, DX, BX, SP, BP, SI, DI,
 
-	// ========================================================================
-	// >> 32-bit General purpose registers
-	// ========================================================================
-	EAX,
-	ECX,
-	EDX,
-	EBX,
-	ESP,
-	EBP,
-	ESI,
-	EDI,
+	// 32-bit general purpose registers
+	EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI,
 
-	// ========================================================================
-	// >> 64-bit MM (MMX) registers
-	// ========================================================================
-	MM0,
-	MM1,
-	MM2,
-	MM3,
-	MM4,
-	MM5,
-	MM6,
-	MM7,
+	// 64-bit MMX registers
+	MM0, MM1, MM2, MM3, MM4, MM5, MM6, MM7,
 
-	// ========================================================================
-	// >> 128-bit XMM registers
-	// ========================================================================
-	XMM0,
-	XMM1,
-	XMM2,
-	XMM3,
-	XMM4,
-	XMM5,
-	XMM6,
-	XMM7,
+	// 128-bit XMM registers
+	XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
 
-	// ========================================================================
-	// >> 16-bit Segment registers
-	// ========================================================================
-	CS,
-	SS,
-	DS,
-	ES,
-	FS,
-	GS,
+	// 16-bit segment registers
+	CS, SS, DS, ES, FS, GS,
 
-	// ========================================================================
-	// >> 80-bit FPU registers
-	// ========================================================================
-	ST0,
-	ST1,
-	ST2,
-	ST3,
-	ST4,
-	ST5,
-	ST6,
-	ST7,
+	// 80-bit FPU registers (only st0 can be saved)
+	ST0, ST1, ST2, ST3, ST4, ST5, ST6, ST7,
 };
+
+// The number of Register_t values.
+const int REGISTER_COUNT = ST7 + 1;
+
+// The size of a register in bytes.
+int GetRegisterSize(Register_t reg);
 
 
 // ============================================================================
 // >> CRegister
 // ============================================================================
+/*
+The saved value of a register. The storage is 16-byte aligned, as movaps (which saves the XMM
+registers) requires.
+*/
 class CRegister
 {
 public:
-	CRegister(int iSize)
+	explicit CRegister(int iSize) : m_iSize(iSize)
 	{
-		m_iSize = iSize;
-		m_pAddress = malloc(iSize);
+		memset(m_Value, 0, sizeof(m_Value));
 	}
 
-	~CRegister()
+	CRegister(const CRegister&) = delete;
+	CRegister& operator=(const CRegister&) = delete;
+
+	int GetSize() const
 	{
-		free(m_pAddress);
+		return m_iSize;
+	}
+
+	void* GetAddress()
+	{
+		return m_Value;
 	}
 
 	template<class T>
-	T GetValue()
+	T GetValue() const
 	{
-		return *(T *) m_pAddress;
-	}
-
-	template<class T>
-	T GetPointerValue(int iOffset=0)
-	{
-		return *(T *) (GetValue<unsigned long>() + iOffset);
+		T value;
+		memcpy(&value, m_Value, sizeof(T));
+		return value;
 	}
 
 	template<class T>
 	void SetValue(T value)
 	{
-		*(T *) m_pAddress = value;
+		memcpy(m_Value, &value, sizeof(T));
+	}
+
+	// The value at <iOffset> bytes from the address the register holds.
+	template<class T>
+	T GetPointerValue(int iOffset = 0) const
+	{
+		return *reinterpret_cast<T*>(GetValue<unsigned long>() + iOffset);
 	}
 
 	template<class T>
-	void SetPointerValue(T value, int iOffset=0)
+	void SetPointerValue(T value, int iOffset = 0)
 	{
-		*(T *) (GetValue<unsigned long>() + iOffset) = value;
+		*reinterpret_cast<T*>(GetValue<unsigned long>() + iOffset) = value;
 	}
 
-public:
+private:
 	int m_iSize;
-	void* m_pAddress;
+	alignas(16) unsigned char m_Value[SIZE_XMMWORD];
 };
 
 
 // ============================================================================
 // >> CRegisters
 // ============================================================================
+/*
+The registers a calling convention saves (see ICallingConvention::GetRegisters).
+*/
 class CRegisters
 {
 public:
-	CRegisters(std::list<Register_t> registers);
-	~CRegisters();
+	explicit CRegisters(const std::vector<Register_t>& registers);
+
+	CRegisters(const CRegisters&) = delete;
+	CRegisters& operator=(const CRegisters&) = delete;
+
+	// The saved register, or nullptr if this register isn't saved.
+	CRegister* Get(Register_t reg) const
+	{
+		return m_Registers[reg].get();
+	}
 
 private:
-	CRegister* CreateRegister(std::list<Register_t>& registers, Register_t reg, int iSize);
-	void DeleteRegister(CRegister* pRegister);
-
-public:
-	// ========================================================================
-	// >> 8-bit General purpose registers
-	// ========================================================================
-	CRegister* m_al;
-	CRegister* m_cl;
-	CRegister* m_dl;
-	CRegister* m_bl;
-	CRegister* m_ah;
-	CRegister* m_ch;
-	CRegister* m_dh;
-	CRegister* m_bh;
-
-	// ========================================================================
-	// >> 16-bit General purpose registers
-	// ========================================================================
-	CRegister* m_ax;
-	CRegister* m_cx;
-	CRegister* m_dx;
-	CRegister* m_bx;
-	CRegister* m_sp;
-	CRegister* m_bp;
-	CRegister* m_si;
-	CRegister* m_di;
-
-	// ========================================================================
-	// >> 32-bit General purpose registers
-	// ========================================================================
-	CRegister* m_eax;
-	CRegister* m_ecx;
-	CRegister* m_edx;
-	CRegister* m_ebx;
-	CRegister* m_esp;
-	CRegister* m_ebp;
-	CRegister* m_esi;
-	CRegister* m_edi;
-
-	// ========================================================================
-	// >> 64-bit MM (MMX) registers
-	// ========================================================================
-	CRegister* m_mm0;
-	CRegister* m_mm1;
-	CRegister* m_mm2;
-	CRegister* m_mm3;
-	CRegister* m_mm4;
-	CRegister* m_mm5;
-	CRegister* m_mm6;
-	CRegister* m_mm7;
-
-	// ========================================================================
-	// >> 128-bit XMM registers
-	// ========================================================================
-	CRegister* m_xmm0;
-	CRegister* m_xmm1;
-	CRegister* m_xmm2;
-	CRegister* m_xmm3;
-	CRegister* m_xmm4;
-	CRegister* m_xmm5;
-	CRegister* m_xmm6;
-	CRegister* m_xmm7;
-
-	// ========================================================================
-	// >> 16-bit Segment registers
-	// ========================================================================
-	CRegister* m_cs;
-	CRegister* m_ss;
-	CRegister* m_ds;
-	CRegister* m_es;
-	CRegister* m_fs;
-	CRegister* m_gs;
-
-	// ========================================================================
-	// >> 80-bit FPU registers
-	// ========================================================================
-	CRegister* m_st0;
-	CRegister* m_st1;
-	CRegister* m_st2;
-	CRegister* m_st3;
-	CRegister* m_st4;
-	CRegister* m_st5;
-	CRegister* m_st6;
-	CRegister* m_st7;
+	std::array<std::unique_ptr<CRegister>, REGISTER_COUNT> m_Registers;
 };
 
 #endif // _REGISTERS_H

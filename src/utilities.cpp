@@ -109,9 +109,9 @@ bool PatchCode(void* pDest, const void* pSrc, size_t size)
 		return true;
 
 #if defined __linux__
-	uintptr_t iPageSize = (uintptr_t) sysconf(_SC_PAGESIZE);
-	uintptr_t iFirst = (uintptr_t) pDest & ~(iPageSize - 1);
-	uintptr_t iEnd = ((uintptr_t) pDest + size + iPageSize - 1) & ~(iPageSize - 1);
+	uintptr_t iPageSize = static_cast<uintptr_t>(sysconf(_SC_PAGESIZE));
+	uintptr_t iFirst = reinterpret_cast<uintptr_t>(pDest) & ~(iPageSize - 1);
+	uintptr_t iEnd = (reinterpret_cast<uintptr_t>(pDest) + size + iPageSize - 1) & ~(iPageSize - 1);
 
 	std::vector<CMapping> mappings;
 	if (!ReadMappings(mappings))
@@ -132,7 +132,7 @@ bool PatchCode(void* pDest, const void* pSrc, size_t size)
 	size_t iUnprotected = 0;
 	for (; iUnprotected < prots.size(); iUnprotected++)
 	{
-		void* page = (void *) (iFirst + iUnprotected * iPageSize);
+		void* page = reinterpret_cast<void*>(iFirst + iUnprotected * iPageSize);
 		if (mprotect(page, iPageSize, prots[iUnprotected] | PROT_READ | PROT_WRITE) != 0)
 			break;
 	}
@@ -143,7 +143,7 @@ bool PatchCode(void* pDest, const void* pSrc, size_t size)
 
 	// Restore the previous protection.
 	for (size_t i = 0; i < iUnprotected; i++)
-		mprotect((void *) (iFirst + i * iPageSize), iPageSize, prots[i]);
+		mprotect(reinterpret_cast<void*>(iFirst + i * iPageSize), iPageSize, prots[i]);
 
 	return bResult;
 
@@ -151,8 +151,8 @@ bool PatchCode(void* pDest, const void* pSrc, size_t size)
 	SYSTEM_INFO info;
 	GetSystemInfo(&info);
 	uintptr_t iPageSize = info.dwPageSize;
-	uintptr_t iFirst = (uintptr_t) pDest & ~(iPageSize - 1);
-	uintptr_t iEnd = ((uintptr_t) pDest + size + iPageSize - 1) & ~(iPageSize - 1);
+	uintptr_t iFirst = reinterpret_cast<uintptr_t>(pDest) & ~(iPageSize - 1);
+	uintptr_t iEnd = (reinterpret_cast<uintptr_t>(pDest) + size + iPageSize - 1) & ~(iPageSize - 1);
 
 	// VirtualProtect returns the previous protection of the first page only, so do it per page.
 	std::vector<DWORD> prots;
@@ -160,7 +160,7 @@ bool PatchCode(void* pDest, const void* pSrc, size_t size)
 	for (uintptr_t page = iFirst; page < iEnd; page += iPageSize)
 	{
 		DWORD old;
-		if (!VirtualProtect((void *) page, 1, PAGE_EXECUTE_READWRITE, &old))
+		if (!VirtualProtect(reinterpret_cast<void*>(page), 1, PAGE_EXECUTE_READWRITE, &old))
 		{
 			bResult = false;
 			break;
@@ -177,7 +177,7 @@ bool PatchCode(void* pDest, const void* pSrc, size_t size)
 	for (size_t i = 0; i < prots.size(); i++)
 	{
 		DWORD old;
-		VirtualProtect((void *) (iFirst + i * iPageSize), 1, prots[i], &old);
+		VirtualProtect(reinterpret_cast<void*>(iFirst + i * iPageSize), 1, prots[i], &old);
 	}
 
 	return bResult;

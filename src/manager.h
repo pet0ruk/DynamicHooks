@@ -34,7 +34,9 @@
 // ============================================================================
 // >> INCLUDES
 // ============================================================================
-#include <list>
+#include <memory>
+#include <vector>
+
 #include "hook.h"
 #include "convention.h"
 
@@ -46,32 +48,32 @@ class CHookManager
 {
 public:
 	/*
-	Hooks the given function and returns a new CHook instance. If the
-	function was already hooked, the existing CHook instance will be
-	returned (and <pConvention> is deleted).
+	Hooks the function at <pFunc> and returns its hook. If the function is already hooked, the
+	existing hook is returned (<pConvention> isn't used).
 
-	Returns NULL if the function can't be hooked (see CHook::Install). The
-	caller then still owns <pConvention>.
+	Returns nullptr if the function can't be hooked (see CHook::Install).
+
+	The hook keeps a reference to <pConvention> until the function is unhooked.
 	*/
-    CHook* HookFunction(void* pFunc, ICallingConvention* pConvention);
-	
-	/*
-	Removes all callbacks and restores the original function.
-	*/
-    void UnhookFunction(void* pFunc);
+	CHook* HookFunction(void* pFunc, std::shared_ptr<ICallingConvention> pConvention);
 
 	/*
-	Returns either NULL or the found CHook instance.
+	Removes the hook of the function at <pFunc> (and its handlers) and restores the function.
 	*/
-	CHook* FindHook(void* pFunc);
+	void UnhookFunction(void* pFunc);
 
 	/*
-	Removes all callbacks and restores all functions.
+	Returns the hook of the function at <pFunc>, or nullptr if it isn't hooked.
+	*/
+	CHook* FindHook(void* pFunc) const;
+
+	/*
+	Removes every hook and restores all hooked functions.
 	*/
 	void UnhookAllFunctions();
 
-public:
-	std::list<CHook *> m_Hooks;
+private:
+	std::vector<std::unique_ptr<CHook> > m_Hooks;
 };
 
 
@@ -79,7 +81,7 @@ public:
 // >> GetHookManager
 // ============================================================================
 /*
-Returns a pointer to a static CHookManager object.
+Returns the hook manager.
 */
 CHookManager* GetHookManager();
 
