@@ -37,6 +37,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include <Zydis.h>
+
 using namespace asmjit;
 using namespace asmjit::x86;
 
@@ -125,6 +127,41 @@ namespace
 	{
 		a.mov(rax, FunctionAddress(pFunction));
 		a.call(rax);
+	}
+
+	/*
+	Whether the <size> bytes at <pCode> (the instructions the patch replaces) can't be replaced
+	safely, as the 32-bit hook refuses them (see BuildTrampoline in trampoline.h): the function
+	ends (ret or an unconditional jump) before them, so they overwrite whatever follows it (int3
+	padding or the next function), or they include int3 padding. safetyhook doesn't check this.
+	*/
+	bool EndsWithinPatch(const unsigned char* pCode, size_t size)
+	{
+		ZydisDecoder decoder;
+		if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64)))
+			return true;
+
+		for (size_t offset = 0; offset < size;)
+		{
+			ZydisDecodedInstruction ix;
+			if (!ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&decoder, nullptr, pCode + offset,
+				ZYDIS_MAX_INSTRUCTION_LENGTH, &ix)))
+			{
+				return true;
+			}
+
+			if (ix.mnemonic == ZYDIS_MNEMONIC_INT3)
+				return true;
+
+			offset += ix.length;
+			// The last instruction replaced may end the function.
+			if (offset < size && (ix.meta.category == ZYDIS_CATEGORY_RET
+				|| ix.meta.category == ZYDIS_CATEGORY_UNCOND_BR))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/*
@@ -231,6 +268,10 @@ bool CHook::Install()
 	// known now, so the function may only jump to the bridge once it is set.
 	auto patch = safetyhook::InlineHook::create(m_pFunc, m_pBridge, safetyhook::InlineHook::StartDisabled);
 	if (!patch)
+		return false;
+
+	const std::vector<uint8_t>& original = patch->original_bytes();
+	if (EndsWithinPatch(original.data(), original.size()))
 		return false;
 
 	m_pTrampoline = patch->original<void*>();

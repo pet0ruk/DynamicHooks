@@ -38,6 +38,8 @@
 // 4. Handlers run with a 16-byte aligned stack.
 // 5. Machine code whose first instruction (in the bytes the hook's jump replaces) is
 //    RIP-relative: the trampoline must still read the right address.
+// 6. Functions shorter than the hook's jump (ending with ret or jmp, followed by int3 padding
+//    or other code) are refused, and left unchanged.
 // ============================================================================
 #include "assert.h"
 #include "string.h"
@@ -396,6 +398,30 @@ static void TestRipRelative(CHookManager* pManager)
 
 
 // ============================================================================
+// >> 6. Functions the hook refuses
+// ============================================================================
+static void TestRefused(CHookManager* pManager)
+{
+	const unsigned char functions[][16] = {
+		{ 0x31, 0xC0, 0xC3, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC },			// xor eax, eax; ret; int3...
+		{ 0x31, 0xC0, 0xC3, 0x31, 0xC0, 0xFF, 0xC0, 0xC3 },			// xor eax, eax; ret; (next function)
+		{ 0xEB, 0x00, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xC3 },	// jmp +0; nop...
+		{ 0x90, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC },			// nop; int3...
+	};
+	for (const unsigned char* function : functions)
+	{
+		unsigned char* pCode = static_cast<unsigned char*>(AllocateCode(4096));
+		assert(pCode);
+		memset(pCode, 0xCC, 4096);
+		memcpy(pCode, function, 16);
+
+		assert(pManager->HookFunction(pCode, MakeConvention({}, DATA_TYPE_INT)) == nullptr);
+		assert(memcmp(pCode, function, 16) == 0);
+	}
+}
+
+
+// ============================================================================
 // >> main
 // ============================================================================
 int main()
@@ -405,6 +431,7 @@ int main()
 	TestMemberFunction(pManager);
 	TestRecursion(pManager);
 	TestRipRelative(pManager);
+	TestRefused(pManager);
 	pManager->UnhookAllFunctions();
 	return 0;
 }
