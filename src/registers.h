@@ -36,8 +36,15 @@
 // ============================================================================
 #include <array>
 #include <memory>
+#include <stdint.h>
 #include <string.h>
 #include <vector>
+
+// Defined when building for x86-64 (64-bit Linux or Windows): the hooks then use the x86-64
+// registers and calling conventions (conventions/x86_64*.h) instead of the 32-bit ones.
+#if defined(__x86_64__) || defined(_M_X64)
+	#define DYNAMICHOOKS_X86_64 1
+#endif
 
 
 // ============================================================================
@@ -82,10 +89,18 @@ enum Register_t
 
 	// 80-bit FPU registers (only st0 can be saved)
 	ST0, ST1, ST2, ST3, ST4, ST5, ST6, ST7,
+
+	// x86-64 only. Added after the 32-bit registers, so these keep their values.
+	// 64-bit general purpose registers, in their encoding order
+	RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI,
+	R8, R9, R10, R11, R12, R13, R14, R15,
+
+	// the XMM registers only x86-64 has
+	XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15,
 };
 
 // The number of Register_t values.
-const int REGISTER_COUNT = ST7 + 1;
+const int REGISTER_COUNT = XMM15 + 1;
 
 // The size of a register in bytes.
 int GetRegisterSize(Register_t reg);
@@ -137,13 +152,13 @@ public:
 	template<class T>
 	T GetPointerValue(int iOffset = 0) const
 	{
-		return *reinterpret_cast<T*>(GetValue<unsigned long>() + iOffset);
+		return *reinterpret_cast<T*>(GetValue<uintptr_t>() + iOffset);
 	}
 
 	template<class T>
 	void SetPointerValue(T value, int iOffset = 0)
 	{
-		*reinterpret_cast<T*>(GetValue<unsigned long>() + iOffset) = value;
+		*reinterpret_cast<T*>(GetValue<uintptr_t>() + iOffset) = value;
 	}
 
 private:

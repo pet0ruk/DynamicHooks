@@ -93,8 +93,8 @@ private:
 
 	/*
 	Patches the function to jump to the hook. Returns false, leaving the function unchanged, if
-	its start can't be moved to a trampoline (see BuildTrampoline in trampoline.h) or memory for
-	the hook can't be allocated or written.
+	its start can't be moved to a trampoline (32-bit: see BuildTrampoline in trampoline.h;
+	x86-64: safetyhook can't relocate it) or memory for the hook can't be allocated or written.
 	*/
 	bool Install();
 

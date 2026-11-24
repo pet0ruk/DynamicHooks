@@ -1,5 +1,6 @@
-# Builds DynamicHooks (with AsmJit fetched as pinned in cmake/asmjit.cmake) and runs the tests:
-# Linux i686 (GCC, in the manylinux_2_28 image Source.Python builds with) and Windows Win32 (MSVC).
+# Builds DynamicHooks (with AsmJit and, for x86-64, safetyhook fetched as pinned in cmake/) and
+# runs the tests: Linux i686 and x86_64 (GCC, in the manylinux_2_28 images Source.Python builds
+# with) and Windows Win32 and x64 (MSVC).
 name: CI
 
 on:
@@ -17,6 +18,7 @@ concurrency:
 
 env:
   MANYLINUX_I686: quay.io/pypa/manylinux_2_28_i686@sha256:baf927c001d9dfead35e53de68b2c113b623155b7a878cc45e2e1ad61c9fb5e7
+  MANYLINUX_X86_64: quay.io/pypa/manylinux_2_28_x86_64@sha256:d086f64cddcace250ef0f0073583c51b8298159303290a730c9f59bd91edfd2c
 
 jobs:
   linux:
@@ -34,14 +36,33 @@ jobs:
             cmake --build /tmp/build -j"$(nproc)"
             ctest --test-dir /tmp/build --output-on-failure'
 
+  linux-x86_64:
+    name: linux (x86_64, GCC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7 # v7.0.1
+      - name: Build and test
+        run: |
+          docker run --rm -v "$PWD:/src:ro" "$MANYLINUX_X86_64" bash -euc '
+            gcc --version | head -1
+            cmake -S /src -B /tmp/build -DCMAKE_BUILD_TYPE=Release -DDYNAMICHOOKS_X86_64=ON
+            cmake --build /tmp/build -j"$(nproc)"
+            ctest --test-dir /tmp/build --output-on-failure'
+
   windows:
-    name: windows (Win32, MSVC)
+    name: windows (${{ matrix.platform }}, MSVC)
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [Win32, x64]
     steps:
       - uses: actions/checkout@v7 # v7.0.1
       - name: Build and test
         shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
-          cmake -S . -B build -A Win32
+          cmake -S . -B build -A "$PLATFORM"
           cmake --build build --config Release --parallel
           ctest --test-dir build -C Release --output-on-failure
