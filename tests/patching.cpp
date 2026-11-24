@@ -30,8 +30,10 @@
 // is cdecl int f(int x).
 // ============================================================================
 #include "assert.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <memory>
 #include <vector>
 
 #ifdef _WIN32
@@ -148,11 +150,11 @@ bool PostHook(HookType_t eHookType, CHook* pHook)
 	return false;
 }
 
-static ICallingConvention* MakeConvention()
+static std::shared_ptr<ICallingConvention> MakeConvention()
 {
 	std::vector<DataType_t> vecArgTypes;
 	vecArgTypes.push_back(DATA_TYPE_INT);
-	return new x86MsCdecl(vecArgTypes, DATA_TYPE_INT);
+	return std::make_shared<x86MsCdecl>(vecArgTypes, DATA_TYPE_INT);
 }
 
 
@@ -172,8 +174,8 @@ static void TestHook(const char* name, const Code& code, int expected, size_t of
 
 	CHook* pHook = GetHookManager()->HookFunction(pFunc, MakeConvention());
 	assert(pHook);
-	pHook->AddCallback(HOOKTYPE_PRE, (HookHandlerFn *) (void *) &PreHook);
-	pHook->AddCallback(HOOKTYPE_POST, (HookHandlerFn *) (void *) &PostHook);
+	pHook->AddCallback(HOOKTYPE_PRE, &PreHook);
+	pHook->AddCallback(HOOKTYPE_POST, &PostHook);
 
 	// Patching must leave every page of the function as it was (not writable)
 	assert(!IsWritable(pFunc));
@@ -187,7 +189,7 @@ static void TestHook(const char* name, const Code& code, int expected, size_t of
 	assert(g_iReturnValue == expected);
 
 	// The original function, called through the trampoline
-	Func original = (Func) pHook->m_pTrampoline;
+	Func original = reinterpret_cast<Func>(pHook->GetTrampoline());
 	assert(original(5) == expected);
 	assert(g_iPreCalls == 1);
 
@@ -206,18 +208,73 @@ static void TestRefused(const char* name, const Code& code, int expected)
 {
 	printf("%s\n", name);
 	unsigned char* pFunc = MakeCode(code);
-	ICallingConvention* pConvention = MakeConvention();
-	assert(GetHookManager()->HookFunction(pFunc, pConvention) == NULL);
-	assert(GetHookManager()->FindHook(pFunc) == NULL);
+	std::shared_ptr<ICallingConvention> pConvention = MakeConvention();
+	assert(GetHookManager()->HookFunction(pFunc, pConvention) == nullptr);
+	assert(GetHookManager()->FindHook(pFunc) == nullptr);
 
-	// The convention still belongs to the caller
-	assert(!pConvention->m_bHooked);
-	delete pConvention;
+	// DynamicHooks kept no reference to the convention
+	assert(pConvention.use_count() == 1);
 
 	assert(memcmp(pFunc, code.data(), code.size()) == 0);
 	assert(!IsWritable(pFunc));
 	if (expected)
 		assert(((Func) pFunc)(5) == expected);
+}
+
+/*
+A cdecl convention that also saves (and restores) every register DynamicHooks can save, so the
+hook's code moves each kind: 8/16/32-bit, MMX (movq), XMM (movaps, which needs 16-byte aligned
+storage) and segment registers.
+*/
+class CEveryRegister: public x86MsCdecl
+{
+public:
+	CEveryRegister(std::vector<DataType_t> vecArgTypes, DataType_t returnType)
+		: x86MsCdecl(vecArgTypes, returnType)
+	{
+	}
+
+	std::vector<Register_t> GetRegisters() override
+	{
+		std::vector<Register_t> registers = x86MsCdecl::GetRegisters();
+		for (int reg = AL; reg <= GS; reg++)
+			registers.push_back(static_cast<Register_t>(reg));
+
+		return registers;
+	}
+};
+
+static void TestEveryRegister()
+{
+	printf("every register\n");
+	unsigned char bytes[] = {0x8B, 0x44, 0x24, 0x04, 0x83, 0xC0, 0x07, 0xC3};	// return x + 7
+	unsigned char* pFunc = MakeCode(Code(bytes, bytes + sizeof(bytes)));
+	Func func = reinterpret_cast<Func>(pFunc);
+
+	std::vector<DataType_t> vecArgTypes(1, DATA_TYPE_INT);
+	std::shared_ptr<ICallingConvention> pConvention = std::make_shared<CEveryRegister>(vecArgTypes, DATA_TYPE_INT);
+	CHook* pHook = GetHookManager()->HookFunction(pFunc, pConvention);
+	assert(pHook);
+	pHook->AddCallback(HOOKTYPE_PRE, &PreHook);
+	pHook->AddCallback(HOOKTYPE_POST, &PostHook);
+
+	for (int reg = AL; reg <= GS; reg++)
+	{
+		CRegister* pRegister = pHook->GetRegisters()->Get(static_cast<Register_t>(reg));
+		assert(pRegister);
+		assert(reinterpret_cast<uintptr_t>(pRegister->GetAddress()) % 16 == 0);
+	}
+
+	g_iPreCalls = g_iPostCalls = 0;
+	assert(func(5) == 120);
+	assert(g_iPreCalls == 1 && g_iPostCalls == 1);
+	assert(g_iArgument == 5 && g_iReturnValue == 12);
+
+	// The hook holds the convention until it's unhooked.
+	assert(pConvention.use_count() == 2);
+	GetHookManager()->UnhookFunction(pFunc);
+	assert(pConvention.use_count() == 1);
+	assert(func(5) == 12);
 }
 
 // mov eax, [esp+4]
@@ -348,6 +405,8 @@ int main()
 			0xC3};
 		TestRefused("jecxz", Code(bytes, bytes + sizeof(bytes)), 5);
 	}
+
+	TestEveryRegister();
 
 	GetHookManager()->UnhookAllFunctions();
 	return 0;

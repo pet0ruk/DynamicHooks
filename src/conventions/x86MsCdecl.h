@@ -34,7 +34,7 @@
 // ============================================================================
 // >> INCLUDES
 // ============================================================================
-#include "../convention.h"
+#include "x86Convention.h"
 
 
 // ============================================================================
@@ -60,24 +60,10 @@ Return values:
 	- integers > 32 bits are returned via the eax and edx registers
 	- floating pointer types are returned via the st0 register
 */
-class x86MsCdecl: public ICallingConvention
-{	
+class x86MsCdecl: public x86Convention
+{
 public:
-	x86MsCdecl(std::vector<DataType_t> vecArgTypes, DataType_t returnType, int iAlignment=4);
-	~x86MsCdecl();
-
-	virtual std::list<Register_t> GetRegisters();
-	virtual int GetPopSize();
-	
-	virtual void* GetArgumentPtr(int iIndex, CRegisters* pRegisters);
-	virtual void ArgumentPtrChanged(int iIndex, CRegisters* pRegisters, void* pArgumentPtr);
-
-	virtual void* GetReturnPtr(CRegisters* pRegisters);
-	virtual void ReturnPtrChanged(CRegisters* pRegisters, void* pReturnPtr);
-
-private:
-	void* m_pReturnBuffer;
-	int* m_pOffsets;
+	x86MsCdecl(std::vector<DataType_t> vecArgTypes, DataType_t returnType, int iAlignment = 4);
 };
 
 #endif // _X86_MS_CDECL_H

@@ -34,11 +34,10 @@
 // ============================================================================
 // >> INCLUDES
 // ============================================================================
-#include <list>
 #include <vector>
-#include <stdio.h>
 
 #include "registers.h"
+
 
 // ============================================================================
 // >> DataType_t
@@ -68,16 +67,10 @@ enum DataType_t
 // >> FUNCTIONS
 // ============================================================================
 /*
-Returns the size after applying alignment.
-
-@param <size>:
-The size that should be aligned.
-
-@param <alignment>:
-The alignment that should be used.
+Returns <size> rounded up to a multiple of <alignment>.
 */
 inline int Align(int size, int alignment)
-{    
+{
 	int unaligned = size % alignment;
 	if (unaligned == 0)
 		return size;
@@ -86,106 +79,87 @@ inline int Align(int size, int alignment)
 }
 
 /*
-Returns the size of a data type after applying alignment.
-
-@param <type>:
-The data type you would like to get the size of.
-
-@param <alignment>:
-The alignment that should be used.
+Returns the size of a value of the given type, rounded up to a multiple of <alignment>.
 */
-inline int GetDataTypeSize(DataType_t type, int iAlignment=4)
+inline int GetDataTypeSize(DataType_t type, int iAlignment = 4)
 {
-	switch(type)
+	switch (type)
 	{
 		case DATA_TYPE_VOID:		return 0;
-		case DATA_TYPE_BOOL:		return Align(sizeof(bool),					iAlignment);
-		case DATA_TYPE_CHAR:		return Align(sizeof(char),					iAlignment);
-		case DATA_TYPE_UCHAR:		return Align(sizeof(unsigned char),			iAlignment);
-		case DATA_TYPE_SHORT:		return Align(sizeof(short),					iAlignment);
-		case DATA_TYPE_USHORT:		return Align(sizeof(unsigned short),		iAlignment);
-		case DATA_TYPE_INT:			return Align(sizeof(int),					iAlignment);
-		case DATA_TYPE_UINT:		return Align(sizeof(unsigned int),			iAlignment);
-		case DATA_TYPE_LONG:		return Align(sizeof(long),					iAlignment);
-		case DATA_TYPE_ULONG:		return Align(sizeof(unsigned long),			iAlignment);
-		case DATA_TYPE_LONG_LONG:	return Align(sizeof(long long),				iAlignment);
-		case DATA_TYPE_ULONG_LONG:	return Align(sizeof(unsigned long long),	iAlignment);
-		case DATA_TYPE_FLOAT:		return Align(sizeof(float),					iAlignment);
-		case DATA_TYPE_DOUBLE:		return Align(sizeof(double),				iAlignment);
-		case DATA_TYPE_POINTER:		return Align(sizeof(void *),				iAlignment);
-		case DATA_TYPE_STRING:		return Align(sizeof(char *),				iAlignment);
-		default: puts("Unknown data type.");
+		case DATA_TYPE_BOOL:		return Align(sizeof(bool), iAlignment);
+		case DATA_TYPE_CHAR:		return Align(sizeof(char), iAlignment);
+		case DATA_TYPE_UCHAR:		return Align(sizeof(unsigned char), iAlignment);
+		case DATA_TYPE_SHORT:		return Align(sizeof(short), iAlignment);
+		case DATA_TYPE_USHORT:		return Align(sizeof(unsigned short), iAlignment);
+		case DATA_TYPE_INT:			return Align(sizeof(int), iAlignment);
+		case DATA_TYPE_UINT:		return Align(sizeof(unsigned int), iAlignment);
+		case DATA_TYPE_LONG:		return Align(sizeof(long), iAlignment);
+		case DATA_TYPE_ULONG:		return Align(sizeof(unsigned long), iAlignment);
+		case DATA_TYPE_LONG_LONG:	return Align(sizeof(long long), iAlignment);
+		case DATA_TYPE_ULONG_LONG:	return Align(sizeof(unsigned long long), iAlignment);
+		case DATA_TYPE_FLOAT:		return Align(sizeof(float), iAlignment);
+		case DATA_TYPE_DOUBLE:		return Align(sizeof(double), iAlignment);
+		case DATA_TYPE_POINTER:		return Align(sizeof(void *), iAlignment);
+		case DATA_TYPE_STRING:		return Align(sizeof(char *), iAlignment);
 	}
 	return 0;
 }
 
+
 // ============================================================================
-// >> CLASSES
+// >> ICallingConvention
 // ============================================================================
 /*
-This is the base class for every calling convention. Inherit from this class
-to create your own calling convention.
+The base class of every calling convention. A convention says which registers a hook saves,
+where the arguments and the return value are, and how many bytes the function pops.
+
+Hooks hold their convention with a std::shared_ptr (see CHookManager::HookFunction).
 */
 class ICallingConvention
 {
 public:
 	/*
-	Initializes the calling convention.
-
-	@param <vecArgTypes>:
-	A list of DataType_t objects, which define the arguments of the function.
-
-	@param <returnType>:
-	The return type of the function.
+	@param <vecArgTypes>: The types of the function's arguments.
+	@param <returnType>: The function's return type.
+	@param <iAlignment>: The stack alignment of the arguments.
 	*/
-	ICallingConvention(std::vector<DataType_t> vecArgTypes, DataType_t returnType, int iAlignment=4)
+	ICallingConvention(std::vector<DataType_t> vecArgTypes, DataType_t returnType, int iAlignment = 4)
+		: m_vecArgTypes(std::move(vecArgTypes)), m_returnType(returnType), m_iAlignment(iAlignment)
 	{
-		m_vecArgTypes = vecArgTypes;
-		m_returnType = returnType;
-		m_iAlignment = iAlignment;
-		m_bHooked = false;
 	}
 
-	/*
-	Destructs the calling convention.
-	*/
-	virtual ~ICallingConvention() {};
+	virtual ~ICallingConvention() = default;
+
+	ICallingConvention(const ICallingConvention&) = delete;
+	ICallingConvention& operator=(const ICallingConvention&) = delete;
 
 	/*
-	This should return a list of Register_t values. These registers will be
-	saved for later access.
+	The registers a hook saves before calling its handlers (and restores afterwards).
 	*/
-	virtual std::list<Register_t> GetRegisters() = 0;
+	virtual std::vector<Register_t> GetRegisters() = 0;
 
 	/*
-	Returns the number of bytes that should be added to the stack to clean up.
+	The number of bytes the function removes from the stack when it returns.
 	*/
 	virtual int GetPopSize() = 0;
 
 	/*
-	Returns a pointer to the argument at the given index.
-
-	@param <iIndex>:
-	The index of the argument.
-
-	@param <pRegisters>:
-	A snapshot of all saved registers.
+	Returns a pointer to the argument at <iIndex>, given the saved registers.
 	*/
 	virtual void* GetArgumentPtr(int iIndex, CRegisters* pRegisters) = 0;
 
 	/*
+	Called after the argument at <iIndex>, at <pArgumentPtr>, was changed.
 	*/
 	virtual void ArgumentPtrChanged(int iIndex, CRegisters* pRegisters, void* pArgumentPtr) = 0;
 
 	/*
-	Returns a pointer to the return value.
-
-	@param <pRegisters>:
-	A snapshot of all saved registers.
+	Returns a pointer to the return value, given the saved registers.
 	*/
 	virtual void* GetReturnPtr(CRegisters* pRegisters) = 0;
 
 	/*
+	Called after the return value, at <pReturnPtr>, was changed.
 	*/
 	virtual void ReturnPtrChanged(CRegisters* pRegisters, void* pReturnPtr) = 0;
 
@@ -193,7 +167,6 @@ public:
 	std::vector<DataType_t> m_vecArgTypes;
 	DataType_t m_returnType;
 	int m_iAlignment;
-	bool m_bHooked;
 };
 
 #endif // _CONVENTION_H

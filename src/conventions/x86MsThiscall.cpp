@@ -32,118 +32,23 @@
 // >> INCLUDES
 // ============================================================================
 #include "x86MsThiscall.h"
-#include <string.h>
 
 
 // ============================================================================
 // >> x86MsThiscall
 // ============================================================================
-x86MsThiscall::x86MsThiscall(std::vector<DataType_t> vecArgTypes, DataType_t returnType, int iAlignment) : 
-	ICallingConvention(vecArgTypes, returnType, iAlignment)
+// The this pointer (the first argument) in ecx, the others on the stack.
+static std::vector<Register_t> GetArgumentRegisters(const std::vector<DataType_t>& vecArgTypes)
 {
-	int iSize = GetDataTypeSize(m_returnType);
-	if (iSize > 4)
-	{
-		m_pReturnBuffer = malloc(iSize);
-	}
-	else
-	{
-		m_pReturnBuffer = NULL;
-	}
-
-	m_pOffsets = new int[m_vecArgTypes.size()];
-	int iOffset = 4;
-	for(int i=1; i < m_vecArgTypes.size(); i++)
-	{
-		m_pOffsets[i] = iOffset;
-		iOffset += GetDataTypeSize(m_vecArgTypes[i], m_iAlignment);
-	}
-}
-
-x86MsThiscall::~x86MsThiscall()
-{
-	if (m_pReturnBuffer)
-	{
-		free(m_pReturnBuffer);
-	}
-
-	delete[] m_pOffsets;
-}
-
-std::list<Register_t> x86MsThiscall::GetRegisters()
-{
-	std::list<Register_t> registers;
-	
-	registers.push_back(ESP);
-	registers.push_back(ECX);
-
-	if (m_returnType == DATA_TYPE_FLOAT || m_returnType == DATA_TYPE_DOUBLE)
-	{
-		registers.push_back(ST0);
-	}
-	else
-	{
-		registers.push_back(EAX);
-		if (m_pReturnBuffer)
-		{
-			registers.push_back(EDX);
-		}
-	}
+	std::vector<Register_t> registers(vecArgTypes.size(), ESP);
+	if (!registers.empty())
+		registers[0] = ECX;
 
 	return registers;
 }
 
-int x86MsThiscall::GetPopSize()
+x86MsThiscall::x86MsThiscall(std::vector<DataType_t> vecArgTypes, DataType_t returnType, int iAlignment)
+	// The function pops its stack arguments.
+	: x86Convention(vecArgTypes, returnType, iAlignment, GetArgumentRegisters(vecArgTypes), true)
 {
-	int iPopSize = 0;
-
-	for(unsigned int i=1; i <= m_vecArgTypes.size() - 1; i++)
-	{
-		iPopSize += GetDataTypeSize(m_vecArgTypes[i], m_iAlignment);
-	}
-
-	return iPopSize;
-}
-
-void* x86MsThiscall::GetArgumentPtr(int iIndex, CRegisters* pRegisters)
-{
-	if (iIndex == 0)
-	{
-		return pRegisters->m_ecx->m_pAddress;
-	}
-
-	return (void *) (pRegisters->m_esp->GetValue<unsigned long>() + m_pOffsets[iIndex]);
-}
-
-void x86MsThiscall::ArgumentPtrChanged(int iIndex, CRegisters* pRegisters, void* pArgumentPtr)
-{
-}
-
-void* x86MsThiscall::GetReturnPtr(CRegisters* pRegisters)
-{
-	if (m_returnType == DATA_TYPE_FLOAT || m_returnType == DATA_TYPE_DOUBLE)
-		return pRegisters->m_st0->m_pAddress;
-
-	if (m_pReturnBuffer)
-	{
-		// First half in eax, second half in edx
-		memcpy(m_pReturnBuffer, pRegisters->m_eax->m_pAddress, 4);
-		memcpy((void *) ((unsigned long) m_pReturnBuffer + 4), pRegisters->m_edx->m_pAddress, 4);
-		return m_pReturnBuffer;
-	}
-
-	return pRegisters->m_eax->m_pAddress;
-}
-
-void x86MsThiscall::ReturnPtrChanged(CRegisters* pRegisters, void* pReturnPtr)
-{
-	if (m_returnType == DATA_TYPE_FLOAT || m_returnType == DATA_TYPE_DOUBLE)
-		return;
-
-	if (m_pReturnBuffer)
-	{
-		// First half in eax, second half in edx
-		memcpy(pRegisters->m_eax->m_pAddress, m_pReturnBuffer, 4);
-		memcpy(pRegisters->m_edx->m_pAddress, (void *) ((unsigned long) m_pReturnBuffer + 4), 4);
-	}
 }

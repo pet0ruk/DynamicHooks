@@ -37,6 +37,7 @@
 // ============================================================================
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 
 // ============================================================================
@@ -49,5 +50,20 @@ they are on writable, writes them and restores each page's previous protection.
 Returns false (writing nothing) if a page isn't mapped or can't be made writable.
 */
 bool PatchCode(void* pDest, const void* pSrc, size_t size);
+
+/*
+Read and write a 32-bit value at any (unaligned) address, e.g. the offset of a jump in code.
+*/
+inline int32_t ReadInt32(const void* p)
+{
+	int32_t value;
+	memcpy(&value, p, sizeof(value));
+	return value;
+}
+
+inline void WriteInt32(void* p, int32_t value)
+{
+	memcpy(p, &value, sizeof(value));
+}
 
 #endif // _UTILITIES_H

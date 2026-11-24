@@ -34,7 +34,7 @@
 // ============================================================================
 // >> INCLUDES
 // ============================================================================
-#include "../convention.h"
+#include "x86Convention.h"
 
 
 // ============================================================================
@@ -60,24 +60,10 @@ Return values:
 	- integers > 32 bits are returned via the eax and edx registers
 	- floating pointer types are returned via the st0 register
 */
-class x86MsStdcall: public ICallingConvention
-{	
+class x86MsStdcall: public x86Convention
+{
 public:
-	x86MsStdcall(std::vector<DataType_t> vecArgTypes, DataType_t returnType, int iAlignment=4);
-	~x86MsStdcall();
-
-	virtual std::list<Register_t> GetRegisters();
-	virtual int GetPopSize();
-	
-	virtual void* GetArgumentPtr(int iIndex, CRegisters* pRegisters);
-	virtual void ArgumentPtrChanged(int iIndex, CRegisters* pRegisters, void* pArgumentPtr);
-
-	virtual void* GetReturnPtr(CRegisters* pRegisters);
-	virtual void ReturnPtrChanged(CRegisters* pRegisters, void* pReturnPtr);
-
-private:
-	void* m_pReturnBuffer;
-	int* m_pOffsets;
+	x86MsStdcall(std::vector<DataType_t> vecArgTypes, DataType_t returnType, int iAlignment = 4);
 };
 
 #endif // _X86_MS_STDCALL_H

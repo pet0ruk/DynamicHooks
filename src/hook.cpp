@@ -36,9 +36,13 @@
 #include "asm.h"
 #include "trampoline.h"
 
-#include <asmjit/x86.h>
 #include <algorithm>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include <asmjit/x86.h>
 using namespace asmjit;
 using namespace asmjit::x86;
 
@@ -54,24 +58,70 @@ struct CHookAssembler
 
 
 // ============================================================================
+// >> HELPERS
+// ============================================================================
+static Imm Address(const void* p)
+{
+	return imm(reinterpret_cast<uintptr_t>(p));
+}
+
+static Mem AbsolutePtr(const void* p, uint32_t size)
+{
+	return ptr_abs(reinterpret_cast<uintptr_t>(p), size);
+}
+
+template<class Function>
+static Imm FunctionAddress(Function pFunction)
+{
+	return imm(reinterpret_cast<uintptr_t>(pFunction));
+}
+
+/*
+The AsmJit register of every Register_t up to GS, in the enum's order (the FPU registers are
+saved with fstp/fld instead).
+*/
+static const Reg s_Registers[] = {
+	al, cl, dl, bl, ah, ch, dh, bh,
+	ax, cx, dx, bx, sp, bp, si, di,
+	eax, ecx, edx, ebx, esp, ebp, esi, edi,
+	mm0, mm1, mm2, mm3, mm4, mm5, mm6, mm7,
+	xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7,
+	cs, ss, ds, es, fs, gs,
+};
+static_assert(sizeof(s_Registers) / sizeof(s_Registers[0]) == GS + 1, "a Register_t is missing");
+
+// The instruction that moves <reg> to or from memory.
+static InstId GetMoveInstruction(Register_t reg)
+{
+	if (reg >= MM0 && reg <= MM7)
+		return Inst::kIdMovq;
+	if (reg >= XMM0 && reg <= XMM7)
+		return Inst::kIdMovaps;
+
+	return Inst::kIdMov;
+}
+
+
+// ============================================================================
 // >> CHook
 // ============================================================================
-CHook::CHook(void* pFunc, ICallingConvention* pConvention)
+CHook::CHook(void* pFunc, std::shared_ptr<ICallingConvention> pConvention)
+	: m_pFunc(pFunc),
+	  m_pCallingConvention(std::move(pConvention)),
+	  m_pJit(new CHookJit),
+	  m_pBridge(nullptr),
+	  m_pNewRetAddr(nullptr),
+	  m_pTrampoline(nullptr),
+	  m_bUsePreRegisters(false)
 {
-	m_pFunc = pFunc;
-	m_pRegistersPre = new CRegisters(pConvention->GetRegisters());
-	m_pRegistersPost = new CRegisters(pConvention->GetRegisters());
-	m_pCallingConvention = pConvention;
-	m_pBridge = NULL;
-	m_pTrampoline = NULL;
-	m_pNewRetAddr = NULL;
-	m_bUsePreRegisters = false;
-	m_pJit = new CHookJit;
+	std::vector<Register_t> registers = m_pCallingConvention->GetRegisters();
+	m_pRegistersPre.reset(new CRegisters(registers));
+	m_pRegistersPost.reset(new CRegisters(registers));
 }
 
 bool CHook::Install()
 {
-	unsigned char* pTarget = (unsigned char *) m_pFunc;
+	unsigned char* pTarget = static_cast<unsigned char*>(m_pFunc);
 	JitAllocator& allocator = m_pJit->rt.allocator();
 
 	// Build the trampoline (the instructions the jump to the bridge replaces, then a jump to the
@@ -86,7 +136,7 @@ bool CHook::Install()
 		return false;
 
 	m_pTrampoline = span.rx();
-	if (!BuildTrampoline(pTarget, OP_JMP_SIZE, (uintptr_t) span.rx(), code, iSourceSize)
+	if (!BuildTrampoline(pTarget, OP_JMP_SIZE, reinterpret_cast<uintptr_t>(span.rx()), code, iSourceSize)
 		|| allocator.write(span, 0, code.data(), code.size()) != Error::kOk)
 	{
 		return false;
@@ -97,9 +147,9 @@ bool CHook::Install()
 
 	// Jump to the bridge; the rest of the replaced bytes become nops.
 	std::vector<unsigned char> patch(iSourceSize, OP_NOP);
-	int32_t iOffset = (int32_t) ((uintptr_t) m_pBridge - ((uintptr_t) pTarget + OP_JMP_SIZE));
 	patch[0] = OP_JMP;
-	memcpy(&patch[1], &iOffset, sizeof(iOffset));
+	WriteInt32(&patch[1], static_cast<int32_t>(
+		reinterpret_cast<uintptr_t>(m_pBridge) - (reinterpret_cast<uintptr_t>(pTarget) + OP_JMP_SIZE)));
 
 	m_OriginalBytes.assign(pTarget, pTarget + iSourceSize);
 	if (!PatchCode(pTarget, patch.data(), patch.size()))
@@ -108,101 +158,95 @@ bool CHook::Install()
 		return false;
 	}
 
-	// Flag the convention as hooked and being taken care of
-	m_pCallingConvention->m_bHooked = true;
 	return true;
 }
 
 CHook::~CHook()
 {
-	// Restore the function (if Install() patched it)
+	// Restore the function. The hook's code is freed with m_pJit.
 	if (!m_OriginalBytes.empty())
 		PatchCode(m_pFunc, m_OriginalBytes.data(), m_OriginalBytes.size());
-
-	// Free the trampoline, the asm bridge and new return address
-	JitAllocator& allocator = m_pJit->rt.allocator();
-	if (m_pTrampoline)
-		allocator.release(m_pTrampoline);
-	if (m_pBridge)
-		allocator.release(m_pBridge);
-	if (m_pNewRetAddr)
-		allocator.release(m_pNewRetAddr);
-	delete m_pJit;
-	
-	delete m_pRegistersPre;
-	delete m_pRegistersPost;
-	delete m_pCallingConvention;
 }
 
-void CHook::AddCallback(HookType_t eHookType, HookHandlerFn* pCallback)
+void CHook::AddCallback(HookType_t eHookType, HookHandlerFn pCallback)
 {
-	if (!pCallback)
-		return;
-
-	if (!IsCallbackRegistered(eHookType, pCallback))
-		m_hookHandler[eHookType].push_back(pCallback);
+	if (pCallback && !IsCallbackRegistered(eHookType, pCallback))
+		m_Handlers[eHookType].push_back(pCallback);
 }
 
-void CHook::RemoveCallback(HookType_t eHookType, HookHandlerFn* pCallback)
+void CHook::RemoveCallback(HookType_t eHookType, HookHandlerFn pCallback)
 {
-	if (IsCallbackRegistered(eHookType, pCallback))
-		m_hookHandler[eHookType].remove(pCallback);
+	std::vector<HookHandlerFn>& handlers = m_Handlers[eHookType];
+	handlers.erase(std::remove(handlers.begin(), handlers.end(), pCallback), handlers.end());
 }
 
-bool CHook::IsCallbackRegistered(HookType_t eHookType, HookHandlerFn* pCallback)
+bool CHook::IsCallbackRegistered(HookType_t eHookType, HookHandlerFn pCallback) const
 {
-	std::map<HookType_t, std::list<HookHandlerFn *> >::iterator it = m_hookHandler.find(eHookType);
-	if (it == m_hookHandler.end())
-		return false;
-
-	return std::find(it->second.begin(), it->second.end(), pCallback) != it->second.end();
+	const std::vector<HookHandlerFn>& handlers = m_Handlers[eHookType];
+	return std::find(handlers.begin(), handlers.end(), pCallback) != handlers.end();
 }
-
 
 CRegisters* CHook::GetRegisters()
 {
-	if (m_bUsePreRegisters)
-		return m_pRegistersPre;
-
-	return m_pRegistersPost;
+	return m_bUsePreRegisters ? m_pRegistersPre.get() : m_pRegistersPost.get();
 }
 
-bool CHook::HookHandler(HookType_t eHookType)
-{
-	m_bUsePreRegisters = (eHookType == HOOKTYPE_PRE);
 
-	bool bOverride = false;
-	std::map<HookType_t, std::list<HookHandlerFn *> >::iterator it = m_hookHandler.find(eHookType);
-	if (it == m_hookHandler.end() || it->second.empty())
+// ============================================================================
+// >> Called by the hook's code
+// ============================================================================
+bool __cdecl CHook::HookHandler(CHook* pHook, HookType_t eHookType)
+{
+	pHook->m_bUsePreRegisters = (eHookType == HOOKTYPE_PRE);
+	if (pHook->m_Handlers[eHookType].empty())
 		return false;
 
 	// Iterate over a copy: a handler may add or remove handlers.
-	std::vector<HookHandlerFn *> callbacks(it->second.begin(), it->second.end());
-	for (size_t i = 0; i < callbacks.size(); i++)
+	std::vector<HookHandlerFn> handlers = pHook->m_Handlers[eHookType];
+	bool bOverride = false;
+	for (HookHandlerFn handler : handlers)
 	{
-		bool result = ((HookHandlerFn) callbacks[i])(eHookType, this);
-		if (result)
+		if (handler(eHookType, pHook))
 			bOverride = true;
 	}
 	return bOverride;
 }
 
-void* __cdecl CHook::GetReturnAddress(void* pESP)
+void* __cdecl CHook::PopReturnAddress(CHook* pHook, void* pESP)
 {
-	if (m_RetAddr.count(pESP) == 0)
-		puts("Unable to find return address. You are going to crash now!");
+	auto it = pHook->m_RetAddr.find(pESP);
+	if (it == pHook->m_RetAddr.end() || it->second.empty())
+	{
+		puts("DynamicHooks: unable to find the return address of a hooked call.");
+		abort();
+	}
 
-	void* pRetAddr = m_RetAddr[pESP].back();
-	m_RetAddr[pESP].pop_back();
+	void* pRetAddr = it->second.back();
+	it->second.pop_back();
+	if (it->second.empty())
+		pHook->m_RetAddr.erase(it);
 
 	return pRetAddr;
 }
 
-void __cdecl CHook::SetReturnAddress(void* pRetAddr, void* pESP)
+void __cdecl CHook::PushReturnAddress(CHook* pHook, void* pRetAddr, void* pESP)
 {
-	m_RetAddr[pESP].push_back(pRetAddr);
+	pHook->m_RetAddr[pESP].push_back(pRetAddr);
 }
 
+void* CHook::FindReturnAddress(void* pESP) const
+{
+	auto it = m_RetAddr.find(pESP);
+	if (it == m_RetAddr.end() || it->second.empty())
+		return nullptr;
+
+	return it->second.back();
+}
+
+
+// ============================================================================
+// >> The hook's code
+// ============================================================================
 bool CHook::CreateBridge()
 {
 	CodeHolder code;
@@ -214,66 +258,71 @@ bool CHook::CreateBridge()
 
 	// Write a redirect to the post-hook code
 	Write_ModifyReturnAddress(assembler);
+	if (!m_pNewRetAddr)
+		return false;
 
-	// Call the pre-hook handler and jump to label_override if true was returned
-	Write_CallHandler(assembler, HOOKTYPE_PRE, m_pRegistersPre);
-	a.cmp(eax, true);
-	
+	// Call the pre-hook handlers; skip the function if one returned true. HookHandler returns a
+	// bool, which is only al.
+	Write_CallHandler(assembler, HOOKTYPE_PRE, m_pRegistersPre.get());
+	a.test(al, al);
+
 	// Restore the previously saved registers, so any changes will be applied
-	// (not st0: the x87 stack is empty at function entry and must stay so)
-	Write_RestoreRegisters(assembler, m_pRegistersPre, false);
+	// (not st0: the x87 stack is empty at function entry and must stay so). mov doesn't
+	// change the flags.
+	Write_RestoreRegisters(assembler, m_pRegistersPre.get(), false);
 
-	a.je(label_override);
+	a.jnz(label_override);
 
 	// Jump to the trampoline
-	a.jmp(m_pTrampoline);
+	a.jmp(Address(m_pTrampoline));
 
 	// This code will be executed if a pre-hook returns true
 	a.bind(label_override);
 
 	// The original function is skipped, so load the return value the pre-hook set into st0
 	// if the function returns a floating-point value.
-	Write_LoadST0(assembler, m_pRegistersPre);
+	Write_LoadST0(assembler, m_pRegistersPre.get());
 
 	// Finally, return to the caller
 	// This will still call post hooks, but will skip the original function.
 	a.ret(imm(m_pCallingConvention->GetPopSize()));
 
-	return m_pNewRetAddr && m_pJit->rt.add(&m_pBridge, &code) == Error::kOk;
+	return m_pJit->rt.add(&m_pBridge, &code) == Error::kOk;
 }
 
 void CHook::Write_ModifyReturnAddress(CHookAssembler& assembler)
 {
 	x86::Assembler& a = assembler.a;
-	// Save scratch registers that are used by SetReturnAddress
-	static void* pEAX = NULL;
-	static void* pECX = NULL;
-	static void* pEDX = NULL;
-	a.mov(dword_ptr_abs((uint64_t) &pEAX), eax);
-	a.mov(dword_ptr_abs((uint64_t) &pECX), ecx);
-	a.mov(dword_ptr_abs((uint64_t) &pEDX), edx);
+
+	// Save scratch registers that are used by PushReturnAddress
+	static void* pEAX = nullptr;
+	static void* pECX = nullptr;
+	static void* pEDX = nullptr;
+	a.mov(AbsolutePtr(&pEAX, 4), eax);
+	a.mov(AbsolutePtr(&pECX, 4), ecx);
+	a.mov(AbsolutePtr(&pEDX, 4), edx);
 
 	// Store the return address in eax
 	a.mov(eax, dword_ptr(esp));
-	
+
 	// Save the original return address by using the current esp as the key.
 	// This should be unique until we have returned to the original caller.
-	void (__cdecl CHook::*SetReturnAddress)(void*, void*) = &CHook::SetReturnAddress;
 	a.push(esp);
 	a.push(eax);
-	a.push(this);
-	a.call((void *&) SetReturnAddress);
+	a.push(Address(this));
+	a.call(FunctionAddress(&CHook::PushReturnAddress));
 	a.add(esp, 12);
-	
+
 	// Restore scratch registers
-	a.mov(eax, dword_ptr_abs((uint64_t) &pEAX));
-	a.mov(ecx, dword_ptr_abs((uint64_t) &pECX));
-	a.mov(edx, dword_ptr_abs((uint64_t) &pEDX));
+	a.mov(eax, AbsolutePtr(&pEAX, 4));
+	a.mov(ecx, AbsolutePtr(&pECX, 4));
+	a.mov(edx, AbsolutePtr(&pEDX, 4));
 
 	// Override the return address. This is a redirect to our post-hook code
-	// (CreateBridge fails if it couldn't be created)
-	CreatePostCallback();
-	a.mov(dword_ptr(esp), imm(m_pNewRetAddr));
+	if (CreatePostCallback())
+		a.mov(dword_ptr(esp), Address(m_pNewRetAddr));
+	else
+		m_pNewRetAddr = nullptr;
 }
 
 bool CHook::CreatePostCallback()
@@ -287,44 +336,43 @@ bool CHook::CreatePostCallback()
 
 	// Subtract the previously added bytes (stack size + return address), so
 	// that we can access the arguments again
-	a.sub(esp, imm(iPopSize+4));
+	a.sub(esp, imm(iPopSize + 4));
 
 	// Call the post-hook handler
-	Write_CallHandler(assembler, HOOKTYPE_POST, m_pRegistersPost);
+	Write_CallHandler(assembler, HOOKTYPE_POST, m_pRegistersPost.get());
 
 	// Restore the previously saved registers, so any changes will be applied
-	Write_RestoreRegisters(assembler, m_pRegistersPost, true);
+	Write_RestoreRegisters(assembler, m_pRegistersPost.get(), true);
 
-	// Save scratch registers that are used by GetReturnAddress
-	static void* pEAX = NULL;
-	static void* pECX = NULL;
-	static void* pEDX = NULL;
-	a.mov(dword_ptr_abs((uint64_t) &pEAX), eax);
-	a.mov(dword_ptr_abs((uint64_t) &pECX), ecx);
-	a.mov(dword_ptr_abs((uint64_t) &pEDX), edx);
-	
+	// Save scratch registers that are used by PopReturnAddress
+	static void* pEAX = nullptr;
+	static void* pECX = nullptr;
+	static void* pEDX = nullptr;
+	a.mov(AbsolutePtr(&pEAX, 4), eax);
+	a.mov(AbsolutePtr(&pECX, 4), ecx);
+	a.mov(AbsolutePtr(&pEDX, 4), edx);
+
 	// Get the original return address
-	void* (__cdecl CHook::*GetReturnAddress)(void*) = &CHook::GetReturnAddress;
 	a.push(esp);
-	a.push(this);
-	a.call((void *&) GetReturnAddress);
+	a.push(Address(this));
+	a.call(FunctionAddress(&CHook::PopReturnAddress));
 	a.add(esp, 8);
 
 	// Save the original return address
-	static void* pRetAddr = NULL;
-	a.mov(dword_ptr_abs((uint64_t) &pRetAddr), eax);
-	
+	static void* pRetAddr = nullptr;
+	a.mov(AbsolutePtr(&pRetAddr, 4), eax);
+
 	// Restore scratch registers
-	a.mov(eax, dword_ptr_abs((uint64_t) &pEAX));
-	a.mov(ecx, dword_ptr_abs((uint64_t) &pECX));
-	a.mov(edx, dword_ptr_abs((uint64_t) &pEDX));
+	a.mov(eax, AbsolutePtr(&pEAX, 4));
+	a.mov(ecx, AbsolutePtr(&pECX, 4));
+	a.mov(edx, AbsolutePtr(&pEDX, 4));
 
 	// Add the bytes again to the stack (stack size + return address), so we
 	// don't corrupt the stack.
-	a.add(esp, imm(iPopSize+4));
+	a.add(esp, imm(iPopSize + 4));
 
 	// Jump to the original return address
-	a.jmp(dword_ptr_abs((uint64_t) &pRetAddr));
+	a.jmp(AbsolutePtr(&pRetAddr, 4));
 
 	// Generate the code
 	return m_pJit->rt.add(&m_pNewRetAddr, &code) == Error::kOk;
@@ -333,125 +381,49 @@ bool CHook::CreatePostCallback()
 void CHook::Write_CallHandler(CHookAssembler& assembler, HookType_t type, CRegisters* pRegisters)
 {
 	x86::Assembler& a = assembler.a;
-	bool (__cdecl CHook::*HookHandler)(HookType_t) = &CHook::HookHandler;
 
 	// Save the registers so that we can access them in our handlers
 	Write_SaveRegisters(assembler, pRegisters, type == HOOKTYPE_POST);
 
-	// Call the global hook handler
+	// Call the hook handler
 	// Subtract 4 bytes to preserve 16-Byte stack alignment for Linux
 	a.sub(esp, 4);
-	a.push(type);
-	a.push(this);
-	a.call((void *&) HookHandler);
+	a.push(imm(type));
+	a.push(Address(this));
+	a.call(FunctionAddress(&CHook::HookHandler));
 	a.add(esp, 12);
 }
 
 void CHook::Write_SaveRegisters(CHookAssembler& assembler, CRegisters* pRegisters, bool bWithST0)
 {
 	x86::Assembler& a = assembler.a;
-	std::list<Register_t> vecRegistersToSave = m_pCallingConvention->GetRegisters();
-	for(std::list<Register_t>::iterator it=vecRegistersToSave.begin(); it != vecRegistersToSave.end(); it++)
+	for (Register_t reg : m_pCallingConvention->GetRegisters())
 	{
-		switch(*it)
+		CRegister* pRegister = pRegisters->Get(reg);
+		if (!pRegister)
+			continue;
+
+		if (reg <= GS)
 		{
-		// ========================================================================
-		// >> 8-bit General purpose registers
-		// ========================================================================
-		case AL: a.mov(byte_ptr_abs((uint64_t) pRegisters->m_al->m_pAddress), al); break;
-		case CL: a.mov(byte_ptr_abs((uint64_t) pRegisters->m_cl->m_pAddress), cl); break;
-		case DL: a.mov(byte_ptr_abs((uint64_t) pRegisters->m_dl->m_pAddress), dl); break;
-		case BL: a.mov(byte_ptr_abs((uint64_t) pRegisters->m_bl->m_pAddress), bl); break;
-
-		case AH: a.mov(byte_ptr_abs((uint64_t) pRegisters->m_ah->m_pAddress), ah); break;
-		case CH: a.mov(byte_ptr_abs((uint64_t) pRegisters->m_ch->m_pAddress), ch); break;
-		case DH: a.mov(byte_ptr_abs((uint64_t) pRegisters->m_dh->m_pAddress), dh); break;
-		case BH: a.mov(byte_ptr_abs((uint64_t) pRegisters->m_bh->m_pAddress), bh); break;
-
-		// ========================================================================
-		// >> 16-bit General purpose registers
-		// ========================================================================
-		case AX: a.mov(word_ptr_abs((uint64_t) pRegisters->m_ax->m_pAddress), ax); break;
-		case CX: a.mov(word_ptr_abs((uint64_t) pRegisters->m_cx->m_pAddress), cx); break;
-		case DX: a.mov(word_ptr_abs((uint64_t) pRegisters->m_dx->m_pAddress), dx); break;
-		case BX: a.mov(word_ptr_abs((uint64_t) pRegisters->m_bx->m_pAddress), bx); break;
-		case SP: a.mov(word_ptr_abs((uint64_t) pRegisters->m_sp->m_pAddress), sp); break;
-		case BP: a.mov(word_ptr_abs((uint64_t) pRegisters->m_bp->m_pAddress), bp); break;
-		case SI: a.mov(word_ptr_abs((uint64_t) pRegisters->m_si->m_pAddress), si); break;
-		case DI: a.mov(word_ptr_abs((uint64_t) pRegisters->m_di->m_pAddress), di); break;
-
-		// ========================================================================
-		// >> 32-bit General purpose registers
-		// ========================================================================
-		case EAX: a.mov(dword_ptr_abs((uint64_t) pRegisters->m_eax->m_pAddress), eax); break;
-		case ECX: a.mov(dword_ptr_abs((uint64_t) pRegisters->m_ecx->m_pAddress), ecx); break;
-		case EDX: a.mov(dword_ptr_abs((uint64_t) pRegisters->m_edx->m_pAddress), edx); break;
-		case EBX: a.mov(dword_ptr_abs((uint64_t) pRegisters->m_ebx->m_pAddress), ebx); break;
-		case ESP: a.mov(dword_ptr_abs((uint64_t) pRegisters->m_esp->m_pAddress), esp); break;
-		case EBP: a.mov(dword_ptr_abs((uint64_t) pRegisters->m_ebp->m_pAddress), ebp); break;
-		case ESI: a.mov(dword_ptr_abs((uint64_t) pRegisters->m_esi->m_pAddress), esi); break;
-		case EDI: a.mov(dword_ptr_abs((uint64_t) pRegisters->m_edi->m_pAddress), edi); break;
-
-		// ========================================================================
-		// >> 64-bit MM (MMX) registers
-		// ========================================================================
-		case MM0: a.movq(qword_ptr_abs((uint64_t) pRegisters->m_mm0->m_pAddress), mm0); break;
-		case MM1: a.movq(qword_ptr_abs((uint64_t) pRegisters->m_mm1->m_pAddress), mm1); break;
-		case MM2: a.movq(qword_ptr_abs((uint64_t) pRegisters->m_mm2->m_pAddress), mm2); break;
-		case MM3: a.movq(qword_ptr_abs((uint64_t) pRegisters->m_mm3->m_pAddress), mm3); break;
-		case MM4: a.movq(qword_ptr_abs((uint64_t) pRegisters->m_mm4->m_pAddress), mm4); break;
-		case MM5: a.movq(qword_ptr_abs((uint64_t) pRegisters->m_mm5->m_pAddress), mm5); break;
-		case MM6: a.movq(qword_ptr_abs((uint64_t) pRegisters->m_mm6->m_pAddress), mm6); break;
-		case MM7: a.movq(qword_ptr_abs((uint64_t) pRegisters->m_mm7->m_pAddress), mm7); break;
-
-		// ========================================================================
-		// >> 128-bit XMM registers
-		// ========================================================================
-		// TODO: Also provide movups?
-		case XMM0: a.movaps(dqword_ptr_abs((uint64_t) pRegisters->m_xmm0->m_pAddress), xmm0); break;
-		case XMM1: a.movaps(dqword_ptr_abs((uint64_t) pRegisters->m_xmm1->m_pAddress), xmm1); break;
-		case XMM2: a.movaps(dqword_ptr_abs((uint64_t) pRegisters->m_xmm2->m_pAddress), xmm2); break;
-		case XMM3: a.movaps(dqword_ptr_abs((uint64_t) pRegisters->m_xmm3->m_pAddress), xmm3); break;
-		case XMM4: a.movaps(dqword_ptr_abs((uint64_t) pRegisters->m_xmm4->m_pAddress), xmm4); break;
-		case XMM5: a.movaps(dqword_ptr_abs((uint64_t) pRegisters->m_xmm5->m_pAddress), xmm5); break;
-		case XMM6: a.movaps(dqword_ptr_abs((uint64_t) pRegisters->m_xmm6->m_pAddress), xmm6); break;
-		case XMM7: a.movaps(dqword_ptr_abs((uint64_t) pRegisters->m_xmm7->m_pAddress), xmm7); break;
-
-		// ========================================================================
-		// >> 16-bit Segment registers
-		// ========================================================================
-		case CS: a.mov(word_ptr_abs((uint64_t) pRegisters->m_cs->m_pAddress), cs); break;
-		case SS: a.mov(word_ptr_abs((uint64_t) pRegisters->m_ss->m_pAddress), ss); break;
-		case DS: a.mov(word_ptr_abs((uint64_t) pRegisters->m_ds->m_pAddress), ds); break;
-		case ES: a.mov(word_ptr_abs((uint64_t) pRegisters->m_es->m_pAddress), es); break;
-		case FS: a.mov(word_ptr_abs((uint64_t) pRegisters->m_fs->m_pAddress), fs); break;
-		case GS: a.mov(word_ptr_abs((uint64_t) pRegisters->m_gs->m_pAddress), gs); break;
-
-		// ========================================================================
-		// >> 80-bit FPU registers
-		// ========================================================================
-		case ST0:
-		{
-			if (!bWithST0)
-				break;
-
-			switch(GetDataTypeSize(this->m_pCallingConvention->m_returnType))
-			{
-				case SIZE_DWORD: a.fstp(dword_ptr_abs((uint64_t) pRegisters->m_st0->m_pAddress)); break;
-				case SIZE_QWORD: a.fstp(qword_ptr_abs((uint64_t) pRegisters->m_st0->m_pAddress)); break;
-				case SIZE_TWORD: a.fstp(tword_ptr_abs((uint64_t) pRegisters->m_st0->m_pAddress)); break;
-			}
-			break;
+			Mem target = AbsolutePtr(pRegister->GetAddress(), pRegister->GetSize());
+			a.emit(GetMoveInstruction(reg), target, s_Registers[reg]);
 		}
-		//case ST1: a.mov(tword_ptr_abs(pRegisters->m_st1->m_pAddress), st1); break;
-		//case ST2: a.mov(tword_ptr_abs(pRegisters->m_st2->m_pAddress), st2); break;
-		//case ST3: a.mov(tword_ptr_abs(pRegisters->m_st3->m_pAddress), st3); break;
-		//case ST4: a.mov(tword_ptr_abs(pRegisters->m_st4->m_pAddress), st4); break;
-		//case ST5: a.mov(tword_ptr_abs(pRegisters->m_st5->m_pAddress), st5); break;
-		//case ST6: a.mov(tword_ptr_abs(pRegisters->m_st6->m_pAddress), st6); break;
-		//case ST7: a.mov(tword_ptr_abs(pRegisters->m_st7->m_pAddress), st7); break;
+		else if (reg == ST0)
+		{
+			// The return value: pops it off the x87 stack (Write_RestoreRegisters loads it again).
+			if (!bWithST0)
+				continue;
 
-		default: puts("Unsupported register.");
+			switch (GetDataTypeSize(m_pCallingConvention->m_returnType))
+			{
+				case SIZE_DWORD: a.fstp(AbsolutePtr(pRegister->GetAddress(), SIZE_DWORD)); break;
+				case SIZE_QWORD: a.fstp(AbsolutePtr(pRegister->GetAddress(), SIZE_QWORD)); break;
+				case SIZE_TWORD: a.fstp(AbsolutePtr(pRegister->GetAddress(), SIZE_TWORD)); break;
+			}
+		}
+		else
+		{
+			puts("DynamicHooks: only st0 of the FPU registers can be saved.");
 		}
 	}
 }
@@ -459,99 +431,21 @@ void CHook::Write_SaveRegisters(CHookAssembler& assembler, CRegisters* pRegister
 void CHook::Write_RestoreRegisters(CHookAssembler& assembler, CRegisters* pRegisters, bool bWithST0)
 {
 	x86::Assembler& a = assembler.a;
-	std::list<Register_t> vecRegistersToSave = m_pCallingConvention->GetRegisters();
-	for(std::list<Register_t>::iterator it=vecRegistersToSave.begin(); it != vecRegistersToSave.end(); it++)
+	for (Register_t reg : m_pCallingConvention->GetRegisters())
 	{
-		switch(*it)
+		CRegister* pRegister = pRegisters->Get(reg);
+		if (!pRegister)
+			continue;
+
+		// cs can't be loaded with mov.
+		if (reg <= GS && reg != CS)
 		{
-		// ========================================================================
-		// >> 8-bit General purpose registers
-		// ========================================================================
-		case AL: a.mov(al, byte_ptr_abs((uint64_t) pRegisters->m_al->m_pAddress)); break;
-		case CL: a.mov(cl, byte_ptr_abs((uint64_t) pRegisters->m_cl->m_pAddress)); break;
-		case DL: a.mov(dl, byte_ptr_abs((uint64_t) pRegisters->m_dl->m_pAddress)); break;
-		case BL: a.mov(bl, byte_ptr_abs((uint64_t) pRegisters->m_bl->m_pAddress)); break;
-
-		case AH: a.mov(ah, byte_ptr_abs((uint64_t) pRegisters->m_ah->m_pAddress)); break;
-		case CH: a.mov(ch, byte_ptr_abs((uint64_t) pRegisters->m_ch->m_pAddress)); break;
-		case DH: a.mov(dh, byte_ptr_abs((uint64_t) pRegisters->m_dh->m_pAddress)); break;
-		case BH: a.mov(bh, byte_ptr_abs((uint64_t) pRegisters->m_bh->m_pAddress)); break;
-
-		// ========================================================================
-		// >> 16-bit General purpose registers
-		// ========================================================================
-		case AX: a.mov(ax, word_ptr_abs((uint64_t) pRegisters->m_ax->m_pAddress)); break;
-		case CX: a.mov(cx, word_ptr_abs((uint64_t) pRegisters->m_cx->m_pAddress)); break;
-		case DX: a.mov(dx, word_ptr_abs((uint64_t) pRegisters->m_dx->m_pAddress)); break;
-		case BX: a.mov(bx, word_ptr_abs((uint64_t) pRegisters->m_bx->m_pAddress)); break;
-		case SP: a.mov(sp, word_ptr_abs((uint64_t) pRegisters->m_sp->m_pAddress)); break;
-		case BP: a.mov(bp, word_ptr_abs((uint64_t) pRegisters->m_bp->m_pAddress)); break;
-		case SI: a.mov(si, word_ptr_abs((uint64_t) pRegisters->m_si->m_pAddress)); break;
-		case DI: a.mov(di, word_ptr_abs((uint64_t) pRegisters->m_di->m_pAddress)); break;
-
-		// ========================================================================
-		// >> 32-bit General purpose registers
-		// ========================================================================
-		case EAX: a.mov(eax, dword_ptr_abs((uint64_t) pRegisters->m_eax->m_pAddress)); break;
-		case ECX: a.mov(ecx, dword_ptr_abs((uint64_t) pRegisters->m_ecx->m_pAddress)); break;
-		case EDX: a.mov(edx, dword_ptr_abs((uint64_t) pRegisters->m_edx->m_pAddress)); break;
-		case EBX: a.mov(ebx, dword_ptr_abs((uint64_t) pRegisters->m_ebx->m_pAddress)); break;
-		case ESP: a.mov(esp, dword_ptr_abs((uint64_t) pRegisters->m_esp->m_pAddress)); break;
-		case EBP: a.mov(ebp, dword_ptr_abs((uint64_t) pRegisters->m_ebp->m_pAddress)); break;
-		case ESI: a.mov(esi, dword_ptr_abs((uint64_t) pRegisters->m_esi->m_pAddress)); break;
-		case EDI: a.mov(edi, dword_ptr_abs((uint64_t) pRegisters->m_edi->m_pAddress)); break;
-
-		// ========================================================================
-		// >> 64-bit MM (MMX) registers
-		// ========================================================================
-		case MM0: a.movq(mm0, dqword_ptr_abs((uint64_t) pRegisters->m_mm0->m_pAddress)); break;
-		case MM1: a.movq(mm1, dqword_ptr_abs((uint64_t) pRegisters->m_mm1->m_pAddress)); break;
-		case MM2: a.movq(mm2, dqword_ptr_abs((uint64_t) pRegisters->m_mm2->m_pAddress)); break;
-		case MM3: a.movq(mm3, dqword_ptr_abs((uint64_t) pRegisters->m_mm3->m_pAddress)); break;
-		case MM4: a.movq(mm4, dqword_ptr_abs((uint64_t) pRegisters->m_mm4->m_pAddress)); break;
-		case MM5: a.movq(mm5, dqword_ptr_abs((uint64_t) pRegisters->m_mm5->m_pAddress)); break;
-		case MM6: a.movq(mm6, dqword_ptr_abs((uint64_t) pRegisters->m_mm6->m_pAddress)); break;
-		case MM7: a.movq(mm7, dqword_ptr_abs((uint64_t) pRegisters->m_mm7->m_pAddress)); break;
-
-		// ========================================================================
-		// >> 128-bit XMM registers
-		// ========================================================================
-		// TODO: Also provide movups?
-		case XMM0: a.movaps(xmm0, dqword_ptr_abs((uint64_t) pRegisters->m_xmm0->m_pAddress)); break;
-		case XMM1: a.movaps(xmm1, dqword_ptr_abs((uint64_t) pRegisters->m_xmm1->m_pAddress)); break;
-		case XMM2: a.movaps(xmm2, dqword_ptr_abs((uint64_t) pRegisters->m_xmm2->m_pAddress)); break;
-		case XMM3: a.movaps(xmm3, dqword_ptr_abs((uint64_t) pRegisters->m_xmm3->m_pAddress)); break;
-		case XMM4: a.movaps(xmm4, dqword_ptr_abs((uint64_t) pRegisters->m_xmm4->m_pAddress)); break;
-		case XMM5: a.movaps(xmm5, dqword_ptr_abs((uint64_t) pRegisters->m_xmm5->m_pAddress)); break;
-		case XMM6: a.movaps(xmm6, dqword_ptr_abs((uint64_t) pRegisters->m_xmm6->m_pAddress)); break;
-		case XMM7: a.movaps(xmm7, dqword_ptr_abs((uint64_t) pRegisters->m_xmm7->m_pAddress)); break;
-
-		// ========================================================================
-		// >> 16-bit Segment registers
-		// ========================================================================
-		case CS: a.mov(cs, word_ptr_abs((uint64_t) pRegisters->m_cs->m_pAddress)); break;
-		case SS: a.mov(ss, word_ptr_abs((uint64_t) pRegisters->m_ss->m_pAddress)); break;
-		case DS: a.mov(ds, word_ptr_abs((uint64_t) pRegisters->m_ds->m_pAddress)); break;
-		case ES: a.mov(es, word_ptr_abs((uint64_t) pRegisters->m_es->m_pAddress)); break;
-		case FS: a.mov(fs, word_ptr_abs((uint64_t) pRegisters->m_fs->m_pAddress)); break;
-		case GS: a.mov(gs, word_ptr_abs((uint64_t) pRegisters->m_gs->m_pAddress)); break;
-
-		// ========================================================================
-		// >> 80-bit FPU registers
-		// ========================================================================
-		case ST0:
-			if (bWithST0)
-				Write_LoadST0(assembler, pRegisters);
-			break;
-		//case ST1: a.mov(st1, tword_ptr_abs(pRegisters->m_st1->m_pAddress)); break;
-		//case ST2: a.mov(st2, tword_ptr_abs(pRegisters->m_st2->m_pAddress)); break;
-		//case ST3: a.mov(st3, tword_ptr_abs(pRegisters->m_st3->m_pAddress)); break;
-		//case ST4: a.mov(st4, tword_ptr_abs(pRegisters->m_st4->m_pAddress)); break;
-		//case ST5: a.mov(st5, tword_ptr_abs(pRegisters->m_st5->m_pAddress)); break;
-		//case ST6: a.mov(st6, tword_ptr_abs(pRegisters->m_st6->m_pAddress)); break;
-		//case ST7: a.mov(st7, tword_ptr_abs(pRegisters->m_st7->m_pAddress)); break;
-
-		default: puts("Unsupported register.");
+			Mem source = AbsolutePtr(pRegister->GetAddress(), pRegister->GetSize());
+			a.emit(GetMoveInstruction(reg), s_Registers[reg], source);
+		}
+		else if (reg == ST0 && bWithST0)
+		{
+			Write_LoadST0(assembler, pRegisters);
 		}
 	}
 }
@@ -563,10 +457,11 @@ void CHook::Write_LoadST0(CHookAssembler& assembler, CRegisters* pRegisters)
 	if (returnType != DATA_TYPE_FLOAT && returnType != DATA_TYPE_DOUBLE)
 		return;
 
-	switch(GetDataTypeSize(returnType))
+	void* pAddress = pRegisters->Get(ST0)->GetAddress();
+	switch (GetDataTypeSize(returnType))
 	{
-		case SIZE_DWORD: a.fld(dword_ptr_abs((uint64_t) pRegisters->m_st0->m_pAddress)); break;
-		case SIZE_QWORD: a.fld(qword_ptr_abs((uint64_t) pRegisters->m_st0->m_pAddress)); break;
-		case SIZE_TWORD: a.fld(tword_ptr_abs((uint64_t) pRegisters->m_st0->m_pAddress)); break;
+		case SIZE_DWORD: a.fld(AbsolutePtr(pAddress, SIZE_DWORD)); break;
+		case SIZE_QWORD: a.fld(AbsolutePtr(pAddress, SIZE_QWORD)); break;
+		case SIZE_TWORD: a.fld(AbsolutePtr(pAddress, SIZE_TWORD)); break;
 	}
 }

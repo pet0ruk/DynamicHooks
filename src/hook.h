@@ -34,8 +34,8 @@
 // ============================================================================
 // >> INCLUDES
 // ============================================================================
-#include <list>
 #include <map>
+#include <memory>
 #include <vector>
 
 #include "registers.h"
@@ -59,10 +59,13 @@ enum HookType_t
 // >> TYPEDEFS
 // ============================================================================
 class CHook;
+
+/*
+A hook handler. A pre-hook handler that returns true skips the original function (the hook
+then returns the return value the handlers set).
+*/
 typedef bool (*HookHandlerFn)(HookType_t, CHook*);
 
-// Defined in hook.cpp, so that this header (and code that includes it) doesn't depend on AsmJit:
-// the runtime the generated code lives in, and the assembler that writes it.
 struct CHookJit;
 struct CHookAssembler;
 
@@ -72,24 +75,21 @@ struct CHookAssembler;
 
 
 // ============================================================================
-// >> CLASSES
+// >> CHook
 // ============================================================================
+/*
+A hooked function. Created and owned by CHookManager.
+*/
 class CHook
 {
 private:
 	friend class CHookManager;
 
 	/*
-	Creates a new function hook.
-
-	@param <pFunc>:
-	The address of the function to hook
-
-	@param <pConvention>:
-	The calling convention of <pFunc>.
+	@param <pFunc>: The address of the function to hook.
+	@param <pConvention>: The calling convention of <pFunc>.
 	*/
-	CHook(void* pFunc, ICallingConvention* pConvention);
-	~CHook();
+	CHook(void* pFunc, std::shared_ptr<ICallingConvention> pConvention);
 
 	/*
 	Patches the function to jump to the hook. Returns false, leaving the function unchanged, if
@@ -99,41 +99,75 @@ private:
 	bool Install();
 
 public:
-	/*
-	Adds a hook handler to the hook.
+	// Restores the function (if Install() patched it) and frees the hook's code.
+	~CHook();
 
-	@param type The hook type.
-	@param pFunc The hook handler that should be added.
-	*/
-	void AddCallback(HookType_t type, HookHandlerFn* pFunc);
-	
-	/*
-	Removes a hook handler to the hook.
+	CHook(const CHook&) = delete;
+	CHook& operator=(const CHook&) = delete;
 
-	@param type The hook type.
-	@param pFunc The hook handler that should be removed.
-	*/
-	void RemoveCallback(HookType_t type, HookHandlerFn* pFunc);
-	
 	/*
-	Checks if a hook handler is already added.
+	Adds a hook handler. A handler is only added once per type.
+	*/
+	void AddCallback(HookType_t eHookType, HookHandlerFn pCallback);
 
-	@param type The hook type.
-	@param pFunc The hook handler that should be checked.
-	*/
-	bool IsCallbackRegistered(HookType_t type, HookHandlerFn* pFunc);
-	
-	
 	/*
-	Return the CRegisters pointer based on m_bUsePreRegister. It returns
-	m_pRegisterPre in a pre-hook and m_pRegisterPost in a post-hook.
+	Removes a hook handler.
+	*/
+	void RemoveCallback(HookType_t eHookType, HookHandlerFn pCallback);
+
+	/*
+	Returns whether a hook handler was added.
+	*/
+	bool IsCallbackRegistered(HookType_t eHookType, HookHandlerFn pCallback) const;
+
+	// The address of the hooked function.
+	void* GetFunction() const
+	{
+		return m_pFunc;
+	}
+
+	// The address of the trampoline: calling it calls the original function without the hook.
+	void* GetTrampoline() const
+	{
+		return m_pTrampoline;
+	}
+
+	ICallingConvention* GetCallingConvention() const
+	{
+		return m_pCallingConvention.get();
+	}
+
+	/*
+	The registers saved for the handlers running now: those saved before the function in a
+	pre-hook, those saved after it in a post-hook.
 	*/
 	CRegisters* GetRegisters();
+
+	/*
+	Whether GetRegisters returns the registers saved before the function (true in a pre-hook)
+	or after it (true in a post-hook: false). A post-hook handler can set it to read the
+	arguments as they were passed.
+	*/
+	bool GetUsePreRegisters() const
+	{
+		return m_bUsePreRegisters;
+	}
+
+	void SetUsePreRegisters(bool bUsePreRegisters)
+	{
+		m_bUsePreRegisters = bUsePreRegisters;
+	}
+
+	/*
+	The return address of the innermost call in progress whose stack pointer (at the function's
+	entry) was <pESP>, or nullptr.
+	*/
+	void* FindReturnAddress(void* pESP) const;
 
 	template<class T>
 	T GetArgument(int iIndex)
 	{
-		return *(T *) m_pCallingConvention->GetArgumentPtr(iIndex, GetRegisters());
+		return *static_cast<T*>(m_pCallingConvention->GetArgumentPtr(iIndex, GetRegisters()));
 	}
 
 	template<class T>
@@ -141,14 +175,14 @@ public:
 	{
 		CRegisters* pRegisters = GetRegisters();
 		void* pPtr = m_pCallingConvention->GetArgumentPtr(iIndex, pRegisters);
-		*(T *) pPtr = value;
+		*static_cast<T*>(pPtr) = value;
 		m_pCallingConvention->ArgumentPtrChanged(iIndex, pRegisters, pPtr);
 	}
 
 	template<class T>
 	T GetReturnValue()
 	{
-		return *(T *)  m_pCallingConvention->GetReturnPtr(GetRegisters());
+		return *static_cast<T*>(m_pCallingConvention->GetReturnPtr(GetRegisters()));
 	}
 
 	template<class T>
@@ -156,58 +190,51 @@ public:
 	{
 		CRegisters* pRegisters = GetRegisters();
 		void* pPtr = m_pCallingConvention->GetReturnPtr(pRegisters);
-		*(T *)  pPtr = value;
+		*static_cast<T*>(pPtr) = value;
 		m_pCallingConvention->ReturnPtrChanged(pRegisters, pPtr);
 	}
 
 private:
 	bool CreateBridge();
+	bool CreatePostCallback();
 
 	void Write_ModifyReturnAddress(CHookAssembler& assembler);
 	void Write_CallHandler(CHookAssembler& assembler, HookType_t type, CRegisters* pRegisters);
-	// bWithST0: whether to save/restore st0, which only holds a value (the return value) after
-	// the function has returned. At function entry the x87 stack is empty.
 	void Write_SaveRegisters(CHookAssembler& assembler, CRegisters* pRegisters, bool bWithST0);
 	void Write_RestoreRegisters(CHookAssembler& assembler, CRegisters* pRegisters, bool bWithST0);
 	void Write_LoadST0(CHookAssembler& assembler, CRegisters* pRegisters);
 
-	bool CreatePostCallback();
+	// Called by the hook's code (cdecl, with the hook as the first argument).
+	static bool __cdecl HookHandler(CHook* pHook, HookType_t eHookType);
+	static void* __cdecl PopReturnAddress(CHook* pHook, void* pESP);
+	static void __cdecl PushReturnAddress(CHook* pHook, void* pRetAddr, void* pESP);
 
-	bool __cdecl HookHandler(HookType_t type);
-
-	void* __cdecl GetReturnAddress(void* pESP);
-	void __cdecl SetReturnAddress(void* pRetAddr, void* pESP);
-
-public:
-	std::map<HookType_t, std::list<HookHandlerFn*> > m_hookHandler;
-
-	// Address of the original function
+private:
 	void* m_pFunc;
+	std::shared_ptr<ICallingConvention> m_pCallingConvention;
 
-	ICallingConvention* m_pCallingConvention;
+	// The hook handlers, per HookType_t.
+	std::vector<HookHandlerFn> m_Handlers[2];
 
-	// Address of the bridge
+	// AsmJit's runtime (owns m_pTrampoline, m_pBridge and m_pNewRetAddr).
+	std::unique_ptr<CHookJit> m_pJit;
+
+	// The code the function jumps to, and the post-hook code the function returns to.
 	void* m_pBridge;
-
-	// Address of the trampoline
-	void* m_pTrampoline;
-
-	// Register storage
-	CRegisters* m_pRegistersPre;
-	CRegisters* m_pRegistersPost;
-
-	// New return address
 	void* m_pNewRetAddr;
 
-	std::map<void*, std::vector<void*> > m_RetAddr;
-
-	bool m_bUsePreRegisters;
+	// The function's first instructions, followed by a jump to the rest of the function.
+	void* m_pTrampoline;
 
 	// The bytes of the function the hook's jump replaced, restored when unhooking.
 	std::vector<unsigned char> m_OriginalBytes;
 
-	// AsmJit's runtime (owns m_pTrampoline, m_pBridge and m_pNewRetAddr)
-	CHookJit* m_pJit;
+	std::unique_ptr<CRegisters> m_pRegistersPre;
+	std::unique_ptr<CRegisters> m_pRegistersPost;
+	bool m_bUsePreRegisters;
+
+	// The original return addresses of the calls in progress, by their stack pointer.
+	std::map<void*, std::vector<void*> > m_RetAddr;
 };
 
 #endif // _HOOK_H

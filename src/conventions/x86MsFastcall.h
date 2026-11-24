@@ -34,7 +34,7 @@
 // ============================================================================
 // >> INCLUDES
 // ============================================================================
-#include "../convention.h"
+#include "x86Convention.h"
 
 
 // ============================================================================
@@ -66,29 +66,10 @@ Return values:
 	- integers > 32 bits are returned via the eax and edx registers
 	- floating pointer types are returned via the st0 register
 */
-class x86MsFastcall: public ICallingConvention
-{	
+class x86MsFastcall: public x86Convention
+{
 public:
-	x86MsFastcall(std::vector<DataType_t> vecArgTypes, DataType_t returnType, int iAlignment=4);
-	~x86MsFastcall();
-
-	virtual std::list<Register_t> GetRegisters();
-	virtual int GetPopSize();
-	
-	virtual void* GetArgumentPtr(int iIndex, CRegisters* pRegisters);
-	virtual void ArgumentPtrChanged(int iIndex, CRegisters* pRegisters, void* pArgumentPtr);
-
-	virtual void* GetReturnPtr(CRegisters* pRegisters);
-	virtual void ReturnPtrChanged(CRegisters* pRegisters, void* pReturnPtr);
-
-private:
-	void* m_pReturnBuffer;
-
-	// Per argument: its register (ECX or EDX), or ESP if it is on the stack, at m_pOffsets[i]
-	// bytes from esp (at function entry, so after the return address).
-	Register_t* m_pRegisters;
-	int* m_pOffsets;
-	int m_iRegisterArgs;
+	x86MsFastcall(std::vector<DataType_t> vecArgTypes, DataType_t returnType, int iAlignment = 4);
 };
 
 #endif // _X86_MS_FASTCALL_H

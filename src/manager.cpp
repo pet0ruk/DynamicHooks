@@ -33,65 +33,58 @@
 // ============================================================================
 #include "manager.h"
 
+#include <algorithm>
+
 
 // ============================================================================
 // >> CHookManager
 // ============================================================================
-CHook* CHookManager::HookFunction(void* pFunc, ICallingConvention* pConvention)
+CHook* CHookManager::HookFunction(void* pFunc, std::shared_ptr<ICallingConvention> pConvention)
 {
-	if (!pFunc)
-		return NULL;
+	if (!pFunc || !pConvention)
+		return nullptr;
 
-	CHook* pHook = FindHook(pFunc);
-	if (pHook)
-	{
-		delete pConvention;
+	if (CHook* pHook = FindHook(pFunc))
 		return pHook;
-	}
-	
-	pHook = new CHook(pFunc, pConvention);
-	if (!pHook->Install())
-	{
-		// The caller keeps the convention.
-		pHook->m_pCallingConvention = NULL;
-		delete pHook;
-		return NULL;
-	}
 
-	m_Hooks.push_back(pHook);
-	return pHook;
+	std::unique_ptr<CHook> pHook(new CHook(pFunc, std::move(pConvention)));
+	if (!pHook->Install())
+		return nullptr;
+
+	m_Hooks.push_back(std::move(pHook));
+	return m_Hooks.back().get();
 }
 
 void CHookManager::UnhookFunction(void* pFunc)
 {
-	CHook* pHook = FindHook(pFunc);
-	if (pHook)
-	{
-		m_Hooks.remove(pHook);
-		delete pHook;
-	}
+	auto it = std::find_if(m_Hooks.begin(), m_Hooks.end(),
+		[pFunc](const std::unique_ptr<CHook>& pHook) { return pHook->GetFunction() == pFunc; });
+
+	if (it == m_Hooks.end())
+		return;
+
+	// Take the hook out of the list first, so FindHook doesn't return it while it is destroyed.
+	std::unique_ptr<CHook> pHook = std::move(*it);
+	m_Hooks.erase(it);
 }
 
-CHook* CHookManager::FindHook(void* pFunc)
+CHook* CHookManager::FindHook(void* pFunc) const
 {
 	if (!pFunc)
-		return NULL;
+		return nullptr;
 
-	for(std::list<CHook *>::iterator it=m_Hooks.begin(); it != m_Hooks.end(); it++)
+	for (const std::unique_ptr<CHook>& pHook : m_Hooks)
 	{
-		CHook* pHook = *it;
-		if (pHook->m_pFunc == pFunc)
-			return pHook;
+		if (pHook->GetFunction() == pFunc)
+			return pHook.get();
 	}
-	return NULL;
+	return nullptr;
 }
 
 void CHookManager::UnhookAllFunctions()
 {
-	for(std::list<CHook *>::iterator it=m_Hooks.begin(); it != m_Hooks.end(); it++)
-		delete *it;
-
-	m_Hooks.clear();
+	std::vector<std::unique_ptr<CHook> > hooks;
+	hooks.swap(m_Hooks);
 }
 
 
@@ -100,6 +93,7 @@ void CHookManager::UnhookAllFunctions()
 // ============================================================================
 CHookManager* GetHookManager()
 {
+	// Never destroyed: hooks may still be in use while the process exits.
 	static CHookManager* s_pManager = new CHookManager;
 	return s_pManager;
 }

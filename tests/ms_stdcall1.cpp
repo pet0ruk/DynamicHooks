@@ -102,11 +102,11 @@ int main()
 	// Hook the function
 	CHook* pHook = pHookMngr->HookFunction(
 		(void *) &MyFunc,
-		new x86MsStdcall(vecArgTypes, DATA_TYPE_INT)
+		std::make_shared<x86MsStdcall>(vecArgTypes, DATA_TYPE_INT)
 	);
 
-	pHook->AddCallback(HOOKTYPE_PRE, (HookHandlerFn *) (void *) &PreMyFunc);
-	pHook->AddCallback(HOOKTYPE_POST, (HookHandlerFn *) (void *) &PostMyFunc);
+	pHook->AddCallback(HOOKTYPE_PRE, &PreMyFunc);
+	pHook->AddCallback(HOOKTYPE_POST, &PostMyFunc);
 
 	// Call the function
 	int return_value = MyFunc(3, 10);
