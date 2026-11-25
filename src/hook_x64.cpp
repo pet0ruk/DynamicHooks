@@ -130,10 +130,14 @@ namespace
 	}
 
 	/*
-	Whether the <size> bytes at <pCode> (the instructions the patch replaces) can't be replaced
-	safely, as the 32-bit hook refuses them (see BuildTrampoline in trampoline.h): the function
-	ends (ret or an unconditional jump) before them, so they overwrite whatever follows it (int3
-	padding or the next function), or they include int3 padding. safetyhook doesn't check this.
+	Whether the <size> bytes at <pCode> (the function; the instructions the patch replaces) can't
+	be replaced safely: the function ends (ret or an unconditional jump) before them, so they
+	would overwrite whatever follows it, or they include an int3. safetyhook doesn't check this.
+
+	One case is allowed: the function ends within them and is followed only by int3 padding up to
+	the next 16-byte boundary, which the patch doesn't reach. That is the alignment padding MSVC
+	puts between functions, which is never executed (the next function starts at the boundary),
+	so a function shorter than the jump, e.g. "mov [rcx+16], dl; ret", can still be hooked.
 	*/
 	bool EndsWithinPatch(const unsigned char* pCode, size_t size)
 	{
@@ -158,7 +162,16 @@ namespace
 			if (offset < size && (ix.meta.category == ZYDIS_CATEGORY_RET
 				|| ix.meta.category == ZYDIS_CATEGORY_UNCOND_BR))
 			{
-				return true;
+				uintptr_t end = reinterpret_cast<uintptr_t>(pCode) + offset;
+				uintptr_t boundary = (end + 15) & ~static_cast<uintptr_t>(15);
+				if (reinterpret_cast<uintptr_t>(pCode) + size > boundary)
+					return true;
+				for (const unsigned char* p = pCode + offset; reinterpret_cast<uintptr_t>(p) < boundary; ++p)
+				{
+					if (*p != 0xCC)
+						return true;
+				}
+				return false;
 			}
 		}
 		return false;
@@ -270,8 +283,8 @@ bool CHook::Install()
 	if (!patch)
 		return false;
 
-	const std::vector<uint8_t>& original = patch->original_bytes();
-	if (EndsWithinPatch(original.data(), original.size()))
+	// (disabled: the function's bytes are still the original ones)
+	if (EndsWithinPatch(static_cast<const unsigned char*>(m_pFunc), patch->original_bytes().size()))
 		return false;
 
 	m_pTrampoline = patch->original<void*>();

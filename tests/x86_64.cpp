@@ -38,8 +38,10 @@
 // 4. Handlers run with a 16-byte aligned stack.
 // 5. Machine code whose first instruction (in the bytes the hook's jump replaces) is
 //    RIP-relative: the trampoline must still read the right address.
-// 6. Functions shorter than the hook's jump (ending with ret or jmp, followed by int3 padding
-//    or other code) are refused, and left unchanged.
+// 6. A function shorter than the hook's jump, followed by int3 padding up to the next 16-byte
+//    boundary (as MSVC aligns functions), is hooked. Other functions shorter than the jump
+//    (followed by other code, or by int3 padding the jump would reach past) are refused, and
+//    left unchanged.
 // ============================================================================
 #include "assert.h"
 #include "string.h"
@@ -400,23 +402,54 @@ static void TestRipRelative(CHookManager* pManager)
 // ============================================================================
 // >> 6. Functions the hook refuses
 // ============================================================================
+static bool PrePadding(HookType_t, CHook*)
+{
+	g_iPre++;
+	return false;
+}
+
 static void TestRefused(CHookManager* pManager)
 {
-	const unsigned char functions[][16] = {
-		{ 0x31, 0xC0, 0xC3, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC },			// xor eax, eax; ret; int3...
-		{ 0x31, 0xC0, 0xC3, 0x31, 0xC0, 0xFF, 0xC0, 0xC3 },			// xor eax, eax; ret; (next function)
-		{ 0xEB, 0x00, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xC3 },	// jmp +0; nop...
-		{ 0x90, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC },			// nop; int3...
-	};
-	for (const unsigned char* function : functions)
+	// xor eax, eax; ret; then int3 padding (the rest of the page) to the 16-byte boundary
 	{
 		unsigned char* pCode = static_cast<unsigned char*>(AllocateCode(4096));
 		assert(pCode);
 		memset(pCode, 0xCC, 4096);
-		memcpy(pCode, function, 16);
+		const unsigned char code[] = { 0x31, 0xC0, 0xC3 };
+		memcpy(pCode, code, sizeof(code));
+		int (*pFunc)() = reinterpret_cast<int (*)()>(pCode);
+
+		CHook* pHook = pManager->HookFunction(pCode, MakeConvention({}, DATA_TYPE_INT));
+		assert(pHook);
+		pHook->AddCallback(HOOKTYPE_PRE, &PrePadding);
+		g_iPre = 0;
+		assert(pFunc() == 0 && g_iPre == 1);
+		pManager->UnhookFunction(pCode);
+		assert(memcmp(pCode, code, sizeof(code)) == 0 && pCode[3] == 0xCC && pFunc() == 0);
+	}
+
+	struct Refused
+	{
+		size_t offset;				// in the page
+		unsigned char code[16];
+	};
+	const Refused functions[] = {
+		{ 0, { 0x31, 0xC0, 0xC3, 0x31, 0xC0, 0xFF, 0xC0, 0xC3 } },		// xor eax, eax; ret; (next function)
+		{ 0, { 0x31, 0xC0, 0xC3, 0xCC, 0x90, 0x90, 0x90, 0x90 } },		// ...; ret; int3; (code)
+		{ 12, { 0x31, 0xC0, 0xC3, 0xCC, 0x31, 0xC0, 0xC3, 0xCC } },	// ...; ret; int3 up to the boundary, then a function
+		{ 0, { 0xEB, 0x00, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xC3 } },	// jmp +0; nop...
+		{ 0, { 0x90, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC } },		// nop; int3...
+	};
+	for (const Refused& function : functions)
+	{
+		unsigned char* pPage = static_cast<unsigned char*>(AllocateCode(4096));
+		assert(pPage);
+		memset(pPage, 0xCC, 4096);
+		unsigned char* pCode = pPage + function.offset;
+		memcpy(pCode, function.code, 16);
 
 		assert(pManager->HookFunction(pCode, MakeConvention({}, DATA_TYPE_INT)) == nullptr);
-		assert(memcmp(pCode, function, 16) == 0);
+		assert(memcmp(pCode, function.code, 16) == 0);
 	}
 }
 
